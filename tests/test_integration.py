@@ -9,6 +9,18 @@ from cowp.config import default_config_data, write_json
 from tests.conftest import run, write_manifest
 
 
+def test_init_writes_planning_templates(git_repo: Path, fake_opencode: Path):
+    assert main(["init", "--repo", str(git_repo)]) == 0
+
+    planning_protocol = git_repo / ".codex-workerpool" / "plans" / "PLANNING_PROTOCOL.md"
+    feature_template = git_repo / ".codex-workerpool" / "plans" / "FEATURE-001.example.md"
+    assert planning_protocol.is_file()
+    assert feature_template.is_file()
+    assert "Review Gate" in planning_protocol.read_text(encoding="utf-8")
+    assert "Ready Gate" in planning_protocol.read_text(encoding="utf-8")
+    assert "Reviewed Task Breakdown" in feature_template.read_text(encoding="utf-8")
+
+
 def test_start_run_status_review_finish_with_fake_opencode(
     git_repo: Path,
     workerpool_config: Path,

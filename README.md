@@ -5,6 +5,13 @@ workflow. Codex designs tasks, reviews diffs, and decides when to merge. `cowp`
 creates isolated git worktrees, runs OpenCode workers from a JSON manifest,
 records logs/state, and enforces a review gate before commit and merge.
 
+The workflow has two layers:
+
+- Planning layer: ideas, clarification, design, task split, Review Gate, and
+  Ready Gate live under `.codex-workerpool/plans/`.
+- Execution layer: only ready tasks are copied into `.codex-workerpool/tasks.json`
+  and run by `cowp`.
+
 ## Quick Start
 
 ```powershell
@@ -37,6 +44,8 @@ cowp finish --repo G:\workspace\Project --manifest .codex-workerpool\tasks.examp
 ## Model
 
 - One task maps to one branch and one worktree.
+- A task should enter the manifest only after the planning Review Gate and Ready
+  Gate pass.
 - Multiple OpenCode workers may run concurrently when their `allowed_files` do
   not overlap and their dependencies are satisfied.
 - OpenCode defaults to `--pure`.

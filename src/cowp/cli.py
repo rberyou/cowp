@@ -100,6 +100,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         raise ConfigError(f"repo is not a git worktree root: {repo}")
     workerpool_dir = repo / ".codex-workerpool"
     tasks_dir = workerpool_dir / "tasks"
+    plans_dir = workerpool_dir / "plans"
     config_file = config_path(repo)
 
     write_file(config_file, default_config_data(repo), force=args.force)
@@ -107,8 +108,11 @@ def cmd_init(args: argparse.Namespace) -> int:
     write_text(repo / "TASK_TEMPLATE.md", template_text("TASK_TEMPLATE.md"), force=args.force)
     write_text(repo / "RUNBOOK.md", template_text("RUNBOOK.md"), force=args.force)
     tasks_dir.mkdir(parents=True, exist_ok=True)
+    plans_dir.mkdir(parents=True, exist_ok=True)
     write_json_file(workerpool_dir / "tasks.example.json", example_manifest(), force=args.force)
     write_text(tasks_dir / "TASK-001.md", template_text("TASK_PROMPT.md"), force=args.force)
+    write_text(plans_dir / "PLANNING_PROTOCOL.md", template_text("PLANNING_PROTOCOL.md"), force=args.force)
+    write_text(plans_dir / "FEATURE-001.example.md", template_text("FEATURE_PLAN_TEMPLATE.md"), force=args.force)
     print(f"initialized workerpool files in {repo}")
     return 0
 
