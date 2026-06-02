@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-opencode-workerpool"
+version = "0.1.0"
+description = "Codex-controlled OpenCode worker pool for git worktree based development"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+cowp = "cowp.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cowp = ["templates/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
