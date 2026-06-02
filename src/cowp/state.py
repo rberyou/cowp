@@ -63,7 +63,7 @@ class StateStore:
         with _STATE_LOCK:
             if not self.path.exists():
                 return {}
-            text = self.path.read_text(encoding="utf-8")
+            text = self.path.read_text(encoding="utf-8-sig")
             if not text.strip():
                 return {}
             raw = json.loads(text)
