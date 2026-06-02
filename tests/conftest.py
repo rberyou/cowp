@@ -77,7 +77,11 @@ if target:
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     path.write_text(existing + f"# {task}\\n", encoding="utf-8")
-print(json.dumps({"type": "text", "task": task, "target": target}))
+payload = {"type": "text", "task": task, "target": target}
+if "UNICODE" in prompt:
+    payload["message"] = "多级目录 AI/Python"
+text = json.dumps(payload, ensure_ascii=False) + "\\n"
+sys.stdout.buffer.write(text.encode("utf-8"))
 """.lstrip(),
         encoding="utf-8",
     )

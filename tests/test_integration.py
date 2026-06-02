@@ -97,6 +97,35 @@ def test_run_all_runs_non_overlapping_tasks_in_parallel(
     assert (git_repo.parent / "repo.runs" / "TASK-002" / "opencode.jsonl").exists()
 
 
+def test_run_records_utf8_worker_output(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "unicode output",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    prompt = git_repo / ".codex-workerpool" / "tasks" / "TASK-001.md"
+    prompt.write_text(prompt.read_text(encoding="utf-8") + "\nUNICODE\n", encoding="utf-8")
+    run(["git", "add", ".codex-workerpool"], git_repo)
+    run(["git", "commit", "-m", "add unicode prompt"], git_repo)
+
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+
+    log_path = git_repo.parent / "repo.runs" / "TASK-001" / "opencode.jsonl"
+    assert "多级目录 AI/Python" in log_path.read_text(encoding="utf-8")
+
+
 def test_overlapping_tasks_are_not_run_simultaneously(
     git_repo: Path,
     workerpool_config: Path,

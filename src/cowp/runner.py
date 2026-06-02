@@ -125,6 +125,8 @@ def run_one_task(config: ProjectConfig, task: ManifestTask) -> int:
         cwd=config.repo,
         env=env,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
