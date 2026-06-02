@@ -135,10 +135,17 @@ def run_one_task(config: ProjectConfig, task: ManifestTask) -> int:
         for line in proc.stdout:
             log.write(line)
     exit_code = proc.wait()
-    if exit_code == 0:
-        states.update(task.id, status="worker_succeeded", exit_code=exit_code, error=None)
-    else:
+    if exit_code != 0:
         states.update(task.id, status="worker_failed", exit_code=exit_code, error=f"opencode exited {exit_code}")
+        return exit_code
+
+    unexpected = _changed_files_outside_allowed(worktree, task)
+    if unexpected:
+        error = "worker changed files outside allowed_files: " + ", ".join(unexpected)
+        states.update(task.id, status="worker_failed", exit_code=2, error=error)
+        return 2
+
+    states.update(task.id, status="worker_succeeded", exit_code=exit_code, error=None)
     return exit_code
 
 
@@ -152,3 +159,24 @@ def _dependencies_satisfied(task: ManifestTask, states: dict[str, object]) -> bo
 
 def _overlaps_active(task: ManifestTask, active_tasks: object) -> bool:
     return any(paths_overlap(task.allowed_files, active.allowed_files) for active in active_tasks)
+
+
+def _changed_files_outside_allowed(worktree: Path, task: ManifestTask) -> list[str]:
+    changed = _changed_files(worktree)
+    return sorted(path for path in changed if not paths_overlap([path], task.allowed_files))
+
+
+def _changed_files(worktree: Path) -> set[str]:
+    tracked = subprocess.run(
+        ["git", "-C", str(worktree), "diff", "--name-only", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.splitlines()
+    untracked = subprocess.run(
+        ["git", "-C", str(worktree), "ls-files", "--others", "--exclude-standard"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.splitlines()
+    return {path.replace("\\", "/") for path in tracked + untracked if path.strip()}
