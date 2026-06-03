@@ -71,6 +71,57 @@ def test_start_run_status_review_finish_with_fake_opencode(
     assert "TASK-001" in run(["git", "log", "--oneline", "-1"], git_repo).stdout
 
 
+def test_start_clears_previous_failure_state(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "restart failed task",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    state_path = git_repo.parent / "repo.runs" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "tasks": {
+                    "TASK-001": {
+                        "task_id": "TASK-001",
+                        "status": "worker_failed",
+                        "updated_at": "2026-01-01T00:00:00+00:00",
+                        "branch": "agent/TASK-001",
+                        "worktree": str(git_repo.parent / "repo.worktrees" / "TASK-001"),
+                        "worker": "default",
+                        "log_path": str(git_repo.parent / "repo.runs" / "TASK-001" / "opencode.jsonl"),
+                        "exit_code": 2,
+                        "error": "old failure",
+                    }
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    task_state = state["tasks"]["TASK-001"]
+    assert task_state["status"] == "worktree_created"
+    assert task_state["log_path"] is None
+    assert task_state["exit_code"] is None
+    assert task_state["error"] is None
+
+
 def test_run_all_runs_non_overlapping_tasks_in_parallel(
     git_repo: Path,
     workerpool_config: Path,

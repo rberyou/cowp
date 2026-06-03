@@ -140,6 +140,9 @@ def cmd_start(args: argparse.Namespace) -> int:
             branch=task_branch(task.id),
             worktree=str(worktree),
             worker=task.worker or "default",
+            log_path=None,
+            exit_code=None,
+            error=None,
         )
         print(f"{task.id}: {worktree}")
     return 0
