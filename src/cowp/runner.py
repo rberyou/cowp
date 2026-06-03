@@ -119,7 +119,11 @@ def run_one_task(config: ProjectConfig, task: ManifestTask) -> int:
     prompt = effective_prompt(config, task, raw_prompt)
     effective_prompt_path = run_dir / "effective-prompt.md"
     effective_prompt_path.write_text(prompt, encoding="utf-8")
-    args.append(prompt)
+    args.extend(["--file", str(effective_prompt_path)])
+    args.append(
+        f"Read the attached COWP task instructions and implement {task.id} "
+        "exactly in the current worktree. Do not search for a separate task spec file."
+    )
     env = os.environ.copy()
     env["COWP_TASK_ID"] = task.id
     env["COWP_PROMPT_TEXT"] = prompt
