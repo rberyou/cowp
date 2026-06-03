@@ -51,5 +51,7 @@ cowp finish --repo G:\workspace\Project --manifest .codex-workerpool\tasks.examp
 - OpenCode defaults to `--pure`.
 - `run` writes `runs_root/TASK-NNN/effective-prompt.md` with the exact prompt
   sent to OpenCode, including the allowed-file boundary and blocked rule.
+- `run` treats a zero-exit worker with no file changes as failure, so a
+  conversational answer cannot pass as completed implementation.
 - `finish` only stages reviewed files and refuses unreviewed changes.
 - Worker merge is intentionally serial and controlled by Codex.

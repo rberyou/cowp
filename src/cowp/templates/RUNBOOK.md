@@ -79,6 +79,10 @@ allowed files, acceptance command, and blocked-on-boundary rule.
 If a worker reports that it needs a file outside `allowed_files`, reject the run,
 adjust the task split or prompt, clean the task worktree, and run again.
 
+A worker that exits successfully without producing file changes is treated as a
+failed run. Inspect `opencode.jsonl` and `effective-prompt.md`, then adjust the
+task prompt or worker configuration before rerunning.
+
 ## 7. Review And Finish
 
 Codex reviews one task at a time:
