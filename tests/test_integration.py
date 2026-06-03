@@ -44,6 +44,13 @@ def test_start_run_status_review_finish_with_fake_opencode(
     assert main(["validate", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
     assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
     assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    effective_prompt = git_repo.parent / "repo.runs" / "TASK-001" / "effective-prompt.md"
+    assert effective_prompt.is_file()
+    effective_text = effective_prompt.read_text(encoding="utf-8")
+    assert "Non-Negotiable Boundary" in effective_text
+    assert "BLOCKED: required file outside allowed_files" in effective_text
+    assert "`src/example.py`" in effective_text
+    assert "# TASK-001 change example" in effective_text
     assert main(["status", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
     assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
     assert main(

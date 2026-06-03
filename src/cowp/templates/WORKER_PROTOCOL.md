@@ -15,6 +15,9 @@ worktree.
 - Modify files only inside the current worktree.
 - Do not commit, merge, rebase, push, or create branches.
 - Do not modify files outside the assigned task scope.
+- If the task appears to require files outside `allowed_files`, stop and report
+  `BLOCKED: required file outside allowed_files: <path>` instead of editing
+  those files or inventing an end-to-end workaround.
 - Run the acceptance command before reporting completion.
 - Report changed files, the exact test command used, and the test result.
 

@@ -49,5 +49,7 @@ cowp finish --repo G:\workspace\Project --manifest .codex-workerpool\tasks.examp
 - Multiple OpenCode workers may run concurrently when their `allowed_files` do
   not overlap and their dependencies are satisfied.
 - OpenCode defaults to `--pure`.
+- `run` writes `runs_root/TASK-NNN/effective-prompt.md` with the exact prompt
+  sent to OpenCode, including the allowed-file boundary and blocked rule.
 - `finish` only stages reviewed files and refuses unreviewed changes.
 - Worker merge is intentionally serial and controlled by Codex.

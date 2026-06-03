@@ -28,6 +28,8 @@ Out of scope:
 - Use targeted reads and searches.
 - Do not intentionally scan excluded/generated paths.
 - Keep the change minimal and easy to review.
+- If implementation would require an out-of-scope file, report `BLOCKED`
+  instead of widening the task yourself.
 
 ## Acceptance
 

@@ -72,7 +72,12 @@ cowp run --repo . --manifest .codex-workerpool/tasks.example.json --all --max-pa
 ```
 
 OpenCode runs in pure mode by default. Logs are written under the configured
-`runs_root`.
+`runs_root`. `cowp run` also writes `runs_root/TASK-NNN/effective-prompt.md`,
+which is the exact prompt sent to OpenCode after adding the worker protocol,
+allowed files, acceptance command, and blocked-on-boundary rule.
+
+If a worker reports that it needs a file outside `allowed_files`, reject the run,
+adjust the task split or prompt, clean the task worktree, and run again.
 
 ## 7. Review And Finish
 
