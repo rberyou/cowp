@@ -25,6 +25,14 @@ class TaskState:
     log_path: str | None = None
     exit_code: int | None = None
     error: str | None = None
+    review_status: str | None = None
+    review_diff_path: str | None = None
+    final_diff_path: str | None = None
+    reviewed_files: list[str] | None = None
+    worker_acceptance_command: str | None = None
+    worker_acceptance_exit_code: int | None = None
+    main_acceptance_command: str | None = None
+    main_acceptance_exit_code: int | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -37,6 +45,14 @@ class TaskState:
             "log_path": self.log_path,
             "exit_code": self.exit_code,
             "error": self.error,
+            "review_status": self.review_status,
+            "review_diff_path": self.review_diff_path,
+            "final_diff_path": self.final_diff_path,
+            "reviewed_files": self.reviewed_files,
+            "worker_acceptance_command": self.worker_acceptance_command,
+            "worker_acceptance_exit_code": self.worker_acceptance_exit_code,
+            "main_acceptance_command": self.main_acceptance_command,
+            "main_acceptance_exit_code": self.main_acceptance_exit_code,
         }
 
     @classmethod
@@ -51,6 +67,14 @@ class TaskState:
             log_path=data.get("log_path"),
             exit_code=data.get("exit_code"),
             error=data.get("error"),
+            review_status=data.get("review_status"),
+            review_diff_path=data.get("review_diff_path"),
+            final_diff_path=data.get("final_diff_path"),
+            reviewed_files=list(data["reviewed_files"]) if isinstance(data.get("reviewed_files"), list) else None,
+            worker_acceptance_command=data.get("worker_acceptance_command"),
+            worker_acceptance_exit_code=data.get("worker_acceptance_exit_code"),
+            main_acceptance_command=data.get("main_acceptance_command"),
+            main_acceptance_exit_code=data.get("main_acceptance_exit_code"),
         )
 
 

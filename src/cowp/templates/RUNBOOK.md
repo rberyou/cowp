@@ -52,13 +52,22 @@ cowp plan validate `
 
 ## 3. Export Ready Tasks
 
+Inspect the next runnable batch before export:
+
+```powershell
+cowp plan next `
+  --repo . `
+  --plan .codex-workerpool/plans/FEATURE-001.plan.json
+```
+
 Only tasks marked `ready` are exported into the execution layer:
 
 ```powershell
 cowp plan export-ready `
   --repo . `
   --plan .codex-workerpool/plans/FEATURE-001.plan.json `
-  --manifest .codex-workerpool/tasks.json
+  --manifest .codex-workerpool/tasks.json `
+  --runnable-only
 ```
 
 This writes task prompts under `.codex-workerpool/tasks/`, updates
@@ -83,6 +92,10 @@ Draft, review, or blocked tasks must stay in `.codex-workerpool/plans/`.
 For dependency chains, export only the next runnable batch. By default,
 `export-ready` refuses to export tasks whose dependencies are not `merged` in the
 execution state.
+
+For downstream tasks, record the dependency contract in the plan before marking
+the task ready. Exported prompts include those contracts so workers do not rely
+on stale draft endpoints, schemas, or helper behavior.
 
 After export, review and either commit the workerpool metadata or keep
 `.codex-workerpool/` ignored locally before starting worktrees. `cowp start`
@@ -134,6 +147,9 @@ Codex reviews one task at a time:
 cowp review --repo . --manifest .codex-workerpool/tasks.json --task TASK-001
 ```
 
+`review` prints and stores git status, diff stat, and full diff under
+`runs_root/TASK-NNN/`. New untracked files are included in the review diff.
+
 If review passes:
 
 ```powershell
@@ -146,4 +162,18 @@ cowp finish `
 
 `finish` stages only reviewed files, refuses unreviewed changes, runs acceptance
 checks, commits the worker branch, merges it, runs the controller acceptance
-check, and removes the task worktree unless `--keep-worktree` is passed.
+check, records reviewed files/final diff/acceptance results in state, and
+removes the task worktree unless `--keep-worktree` is passed.
+
+## 8. Refresh Local Workflow Files
+
+If this repository keeps WorkerPool files ignored locally, check drift after
+upgrading WorkerPool:
+
+```powershell
+cowp doctor --repo .
+cowp init --repo . --refresh
+```
+
+`--refresh` preserves `.codex-workerpool/config.json` and updates protocol,
+runbook, and planning templates.

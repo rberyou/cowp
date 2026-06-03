@@ -6,6 +6,7 @@ from pathlib import Path
 from cowp.cli import main
 from cowp.config import load_project_config, write_json
 from cowp.planning import export_ready_tasks, load_plan, validate_plan
+from cowp.state import StateStore
 
 
 def test_plan_init_creates_json_and_markdown(git_repo: Path, workerpool_config: Path):
@@ -227,6 +228,164 @@ def test_export_ready_writes_manifest_prompt_and_marks_exported(
     plan = json.loads(path.read_text(encoding="utf-8"))
     assert plan["tasks"][0]["status"] == "exported"
     assert not (git_repo.parent / "repo.runs" / "state.json").exists()
+
+
+def test_plan_next_reports_runnable_batch_and_blockers(
+    git_repo: Path,
+    workerpool_config: Path,
+    capsys,
+):
+    path = _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "next",
+            "status": "draft",
+            "markdown": ".codex-workerpool/plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "base",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+                {
+                    "id": "TASK-002",
+                    "title": "dependent",
+                    "status": "ready",
+                    "depends_on": ["TASK-001"],
+                    "allowed_files": ["tests/test_example.py"],
+                    "prompt": "WRITE tests/test_example.py",
+                },
+                {
+                    "id": "TASK-003",
+                    "title": "later",
+                    "status": "draft",
+                    "allowed_files": ["README.md"],
+                    "prompt": "WRITE README.md",
+                },
+            ],
+        },
+    )
+
+    assert main(["plan", "next", "--repo", str(git_repo), "--plan", str(path)]) == 0
+
+    output = capsys.readouterr().out
+    assert "TASK-001 runnable" in output
+    assert "TASK-002 blocked: dependency 'TASK-001' is not merged" in output
+    assert "TASK-003 blocked: status is draft, not ready" in output
+
+
+def test_export_ready_runnable_only_exports_next_dependency_batch(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    path = _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "batch",
+            "status": "draft",
+            "markdown": ".codex-workerpool/plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "base",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                    "contract": "Defines the base API.",
+                },
+                {
+                    "id": "TASK-002",
+                    "title": "independent",
+                    "status": "ready",
+                    "allowed_files": ["README.md"],
+                    "prompt": "WRITE README.md",
+                },
+                {
+                    "id": "TASK-003",
+                    "title": "dependent",
+                    "status": "ready",
+                    "depends_on": ["TASK-001"],
+                    "allowed_files": ["tests/test_example.py"],
+                    "prompt": "WRITE tests/test_example.py",
+                },
+            ],
+        },
+    )
+
+    assert (
+        main(
+            [
+                "plan",
+                "export-ready",
+                "--repo",
+                str(git_repo),
+                "--plan",
+                str(path),
+                "--manifest",
+                ".codex-workerpool/tasks.json",
+                "--runnable-only",
+            ]
+        )
+        == 0
+    )
+
+    manifest = json.loads((git_repo / ".codex-workerpool" / "tasks.json").read_text(encoding="utf-8"))
+    assert [task["id"] for task in manifest["tasks"]] == ["TASK-001"]
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    statuses = {task["id"]: task["status"] for task in plan["tasks"]}
+    assert statuses == {"TASK-001": "exported", "TASK-002": "ready", "TASK-003": "ready"}
+
+
+def test_export_ready_prompt_includes_dependency_contract(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    path = _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "contracts",
+            "status": "draft",
+            "markdown": ".codex-workerpool/plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "api",
+                    "status": "exported",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                    "contract": "POST /api/v1/reviews/{note_id}/sessions creates a session.",
+                },
+                {
+                    "id": "TASK-002",
+                    "title": "helper",
+                    "status": "ready",
+                    "depends_on": ["TASK-001"],
+                    "allowed_files": ["tests/test_example.py"],
+                    "prompt": "WRITE tests/test_example.py",
+                },
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    StateStore(config.runs_root).update("TASK-001", status="merged")
+
+    exported = export_ready_tasks(config, load_plan(git_repo, path), ".codex-workerpool/tasks.json")
+
+    assert exported == ["TASK-002"]
+    prompt = (git_repo / ".codex-workerpool" / "tasks" / "TASK-002.md").read_text(encoding="utf-8")
+    assert "## Dependency Contracts" in prompt
+    assert "POST /api/v1/reviews/{note_id}/sessions" in prompt
 
 
 def test_export_ready_refuses_unmerged_dependency_unless_ignored(

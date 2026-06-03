@@ -49,6 +49,7 @@ class PlanTask:
     prompt: str | None
     prompt_file: Path | None
     prompt_file_raw: str | None
+    contract: str | None
 
 
 @dataclass(frozen=True)
@@ -180,6 +181,13 @@ def validate_plan(config: ProjectConfig, plan: FeaturePlan) -> ValidationResult:
                 result.errors.append(f"{task.id}: allowed_files is required for {task.status} tasks")
             if not task.prompt and not task.prompt_file:
                 result.errors.append(f"{task.id}: prompt or prompt_file is required for {task.status} tasks")
+            for dep in task.depends_on:
+                try:
+                    dep_task = next(item for item in plan.tasks if item.id == dep)
+                except StopIteration:
+                    continue
+                if not dep_task.contract:
+                    result.warnings.append(f"{task.id}: dependency '{dep}' has no explicit contract")
 
     ready_tasks = [task for task in plan.tasks if task.status in EXPORTABLE_TASK_STATUSES]
     for left_index, left in enumerate(ready_tasks):
@@ -202,6 +210,7 @@ def export_ready_tasks(
     task_id: str | None = None,
     force: bool = False,
     ignore_dependency_state: bool = False,
+    runnable_only: bool = False,
 ) -> list[str]:
     result = validate_plan(config, plan)
     if result.errors:
@@ -213,6 +222,14 @@ def export_ready_tasks(
         if not selected:
             plan.get_task(task_id)
             raise ConfigError(f"{task_id}: task is not ready")
+
+    if runnable_only:
+        runnable_ids = set(next_runnable_task_ids(config, plan, ignore_dependency_state=ignore_dependency_state))
+        selected = [task for task in selected if task.id in runnable_ids]
+        if task_id and not selected:
+            reasons = "; ".join(_plan_task_blockers(config, plan, plan.get_task(task_id), ignore_dependency_state))
+            raise ConfigError(f"{task_id}: task is not runnable: {reasons or 'not selected for the next batch'}")
+
     if not selected:
         return []
 
@@ -278,6 +295,71 @@ def plan_status_lines(config: ProjectConfig, plan: FeaturePlan) -> list[str]:
         lines.append(f"  depends_on: {', '.join(task.depends_on) if task.depends_on else 'none'}")
         lines.append(f"  allowed_files: {len(task.allowed_files)}")
     return lines
+
+
+def plan_next_lines(
+    config: ProjectConfig,
+    plan: FeaturePlan,
+    max_parallel: int | None = None,
+    ignore_dependency_state: bool = False,
+) -> list[str]:
+    result = validate_plan(config, plan)
+    limit = max_parallel or config.max_parallel
+    selected_task_ids = next_runnable_task_ids(
+        config,
+        plan,
+        max_parallel=limit,
+        ignore_dependency_state=ignore_dependency_state,
+    )
+    selected_ids = set(selected_task_ids)
+    selected_tasks = [plan.get_task(task_id) for task_id in selected_task_ids]
+    lines = [
+        f"{plan.feature_id} next runnable batch",
+        f"  max_parallel: {limit}",
+    ]
+    if result.errors:
+        lines.append("  validation_errors:")
+        lines.extend(f"  - {error}" for error in result.errors)
+    if result.warnings:
+        lines.append("  validation_warnings:")
+        lines.extend(f"  - {warning}" for warning in result.warnings)
+
+    for task in plan.tasks:
+        blockers = _plan_task_blockers(config, plan, task, ignore_dependency_state)
+        if task.id in selected_ids:
+            lines.append(f"{task.id} runnable")
+        else:
+            reason = "; ".join(blockers) or _batch_selection_blocker(config, task, selected_tasks, limit)
+            lines.append(f"{task.id} blocked: {reason}")
+        lines.append(f"  status: {task.status}")
+        lines.append(f"  depends_on: {', '.join(task.depends_on) if task.depends_on else 'none'}")
+        lines.append(f"  allowed_files: {len(task.allowed_files)}")
+    return lines
+
+
+def next_runnable_task_ids(
+    config: ProjectConfig,
+    plan: FeaturePlan,
+    max_parallel: int | None = None,
+    ignore_dependency_state: bool = False,
+) -> list[str]:
+    limit = max_parallel or config.max_parallel
+    selected: list[PlanTask] = []
+    worker_counts: dict[str, int] = {}
+    for task in plan.tasks:
+        if _plan_task_blockers(config, plan, task, ignore_dependency_state):
+            continue
+        if len(selected) >= limit:
+            continue
+        if any(paths_overlap(task.allowed_files, other.allowed_files) for other in selected):
+            continue
+        worker_id = task.worker or "default"
+        worker = config.workers.get(worker_id)
+        if worker and worker_counts.get(worker_id, 0) >= worker.max_parallel:
+            continue
+        selected.append(task)
+        worker_counts[worker_id] = worker_counts.get(worker_id, 0) + 1
+    return [task.id for task in selected]
 
 
 def _default_plan_data(feature_id: str, title: str, markdown_path: Path, repo: Path) -> dict[str, Any]:
@@ -389,6 +471,7 @@ def _parse_task(repo: Path, raw: Any) -> PlanTask:
         prompt=_optional_str(raw.get("prompt")),
         prompt_file=prompt_file,
         prompt_file_raw=prompt_file_raw,
+        contract=_optional_str(raw.get("contract")),
     )
 
 
@@ -419,6 +502,7 @@ def _render_task_prompt(plan: FeaturePlan, task: PlanTask) -> str:
     depends = ", ".join(task.depends_on) if task.depends_on else "none"
     allowed = "\n".join(f"- `{path}`" for path in task.allowed_files) or "- <none>"
     acceptance = task.acceptance_command or "<repository default or none>"
+    dependency_contracts = _render_dependency_contracts(plan, task)
     return f"""# {task.id} {task.title}
 
 Feature: `{plan.feature_id}` {plan.title}
@@ -445,6 +529,10 @@ Do not commit, merge, rebase, push, or create branches.
 {acceptance}
 ```
 
+## Dependency Contracts
+
+{dependency_contracts}
+
 ## Non-Goals
 
 - Do not change files outside Allowed Files.
@@ -455,6 +543,77 @@ Do not commit, merge, rebase, push, or create branches.
 
 {task_body.strip()}
 """.rstrip() + "\n"
+
+
+def _render_dependency_contracts(plan: FeaturePlan, task: PlanTask) -> str:
+    if not task.depends_on:
+        return "- none"
+    lines = [
+        "Use the merged dependency behavior, not stale draft assumptions. If a dependency contract is missing or conflicts with the code, stop and report the mismatch.",
+        "",
+    ]
+    for dep in task.depends_on:
+        try:
+            dep_task = plan.get_task(dep)
+        except ConfigError:
+            lines.append(f"- `{dep}`: missing from this plan.")
+            continue
+        contract = dep_task.contract or "No explicit contract recorded; verify the merged APIs, schemas, and helper behavior before editing."
+        lines.append(f"- `{dep}` {dep_task.title}: {contract}")
+    return "\n".join(lines)
+
+
+def _plan_task_blockers(
+    config: ProjectConfig,
+    plan: FeaturePlan,
+    task: PlanTask,
+    ignore_dependency_state: bool = False,
+) -> list[str]:
+    blockers: list[str] = []
+    if task.status != "ready":
+        blockers.append(f"status is {task.status}, not ready")
+    worker_id = task.worker or "default"
+    if worker_id not in config.workers:
+        blockers.append(f"unknown worker '{worker_id}'")
+    if not task.allowed_files:
+        blockers.append("allowed_files is empty")
+    if not task.prompt and not task.prompt_file:
+        blockers.append("missing prompt or prompt_file")
+    if task.prompt_file and not task.prompt_file.is_file():
+        blockers.append(f"prompt file not found: {task.prompt_file}")
+
+    task_ids = {item.id for item in plan.tasks}
+    for dep in task.depends_on:
+        if dep not in task_ids:
+            blockers.append(f"unknown dependency '{dep}'")
+
+    if not ignore_dependency_state:
+        states = StateStore(config.runs_root).load()
+        for dep in task.depends_on:
+            dep_state = states.get(dep)
+            if not dep_state or dep_state.status != "merged":
+                blockers.append(f"dependency '{dep}' is not merged")
+    return blockers
+
+
+def _batch_selection_blocker(
+    config: ProjectConfig,
+    task: PlanTask,
+    selected_tasks: list[PlanTask],
+    max_parallel: int,
+) -> str:
+    for selected in selected_tasks:
+        if paths_overlap(task.allowed_files, selected.allowed_files):
+            return f"allowed_files overlaps with selected {selected.id}"
+    worker_id = task.worker or "default"
+    worker = config.workers.get(worker_id)
+    if worker:
+        worker_count = sum(1 for selected in selected_tasks if (selected.worker or "default") == worker_id)
+        if worker_count >= worker.max_parallel:
+            return f"worker '{worker_id}' max_parallel reached"
+    if len(selected_tasks) >= max_parallel:
+        return "max_parallel limit reached"
+    return "not selected for this batch"
 
 
 def _write_plan_with_status(plan: FeaturePlan, status_by_task: dict[str, str]) -> None:

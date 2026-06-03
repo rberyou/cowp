@@ -21,6 +21,31 @@ def test_init_writes_planning_templates(git_repo: Path, fake_opencode: Path):
     assert "Ready Task Breakdown" in feature_template.read_text(encoding="utf-8")
 
 
+def test_init_refresh_preserves_config_and_updates_templates(git_repo: Path, workerpool_config: Path):
+    config_path = git_repo / ".codex-workerpool" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["base_branch"] = "custom/base"
+    write_json(config_path, config)
+    (git_repo / "WORKER_PROTOCOL.md").write_text("old protocol\n", encoding="utf-8")
+
+    assert main(["init", "--repo", str(git_repo), "--refresh"]) == 0
+
+    refreshed_config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert refreshed_config["base_branch"] == "custom/base"
+    assert "Codex owns task design" in (git_repo / "WORKER_PROTOCOL.md").read_text(encoding="utf-8")
+
+
+def test_doctor_reports_stale_templates(git_repo: Path, workerpool_config: Path, capsys):
+    (git_repo / "WORKER_PROTOCOL.md").write_text("old protocol\n", encoding="utf-8")
+
+    assert main(["doctor", "--repo", str(git_repo)]) == 0
+
+    output = capsys.readouterr().out
+    assert "OK config" in output
+    assert "STALE template" in output
+    assert "WORKER_PROTOCOL.md" in output
+
+
 def test_plan_exported_manifest_runs_execution_flow(
     git_repo: Path,
     workerpool_config: Path,
@@ -142,6 +167,45 @@ def test_start_run_status_review_finish_with_fake_opencode(
 
     assert (git_repo.parent / "repo.worktrees" / "TASK-001").exists() is False
     assert "TASK-001" in run(["git", "log", "--oneline", "-1"], git_repo).stdout
+    state = json.loads((git_repo.parent / "repo.runs" / "state.json").read_text(encoding="utf-8"))
+    task_state = state["tasks"]["TASK-001"]
+    assert task_state["review_status"] == "merged"
+    assert task_state["reviewed_files"] == ["src/example.py"]
+    assert Path(task_state["review_diff_path"]).is_file()
+    assert Path(task_state["final_diff_path"]).is_file()
+
+
+def test_review_includes_untracked_allowed_file_diff(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+    capsys,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "add docs",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["docs/review-strategy.md"],
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    worktree = git_repo.parent / "repo.worktrees" / "TASK-001"
+    doc = worktree / "docs" / "review-strategy.md"
+    doc.parent.mkdir()
+    doc.write_text("review strategy\n", encoding="utf-8")
+
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+
+    output = capsys.readouterr().out
+    assert "docs/review-strategy.md" in output
+    assert "new file mode" in output
+    review_diff = git_repo.parent / "repo.runs" / "TASK-001" / "review.diff"
+    assert "review strategy" in review_diff.read_text(encoding="utf-8")
 
 
 def test_start_clears_previous_failure_state(
@@ -193,6 +257,7 @@ def test_start_clears_previous_failure_state(
     assert task_state["log_path"] is None
     assert task_state["exit_code"] is None
     assert task_state["error"] is None
+    assert task_state["review_diff_path"] is None
 
 
 def test_run_all_runs_non_overlapping_tasks_in_parallel(

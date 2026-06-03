@@ -52,6 +52,10 @@ Status: `review`
 
 Depends on: none
 
+Dependency contract:
+
+- `<For upstream tasks: API/schema/helper behavior downstream tasks can rely on>`
+
 Allowed files:
 
 - `path/to/file`

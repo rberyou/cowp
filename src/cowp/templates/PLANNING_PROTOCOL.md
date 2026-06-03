@@ -49,6 +49,8 @@ Required output per task:
 
 - Task id and title
 - Dependency list
+- Dependency contract for any downstream task that will consume this task's
+  API, schema, helper command, or behavior
 - Allowed files
 - Out-of-scope files
 - Acceptance command
@@ -90,6 +92,7 @@ A task is ready only when all of these are true:
 - The goal can be implemented without further product discussion.
 - Allowed files are narrow enough for review.
 - Dependencies are explicit.
+- Dependency contracts are explicit for downstream tasks.
 - Acceptance criteria are testable.
 - The task does not require the worker to choose architecture.
 - The worker prompt names non-goals and forbidden operations.
@@ -105,11 +108,18 @@ cowp plan validate --repo . --plan .codex-workerpool/plans/FEATURE-001.plan.json
 
 Ready tasks are exported explicitly:
 
+Before export, inspect the next runnable batch:
+
+```powershell
+cowp plan next --repo . --plan .codex-workerpool/plans/FEATURE-001.plan.json
+```
+
 ```powershell
 cowp plan export-ready `
   --repo . `
   --plan .codex-workerpool/plans/FEATURE-001.plan.json `
-  --manifest .codex-workerpool/tasks.json
+  --manifest .codex-workerpool/tasks.json `
+  --runnable-only
 ```
 
 `export-ready` writes `.codex-workerpool/tasks/TASK-NNN.md`, updates
@@ -118,6 +128,13 @@ cowp plan export-ready `
 
 For tasks with `depends_on`, export requires dependency tasks to be `merged` in
 the execution state unless `--ignore-dependency-state` is passed.
+
+`--runnable-only` exports only the next dependency-satisfied, non-overlapping
+batch. Later ready tasks remain in the plan until their dependencies merge.
+
+Exported prompts include a `Dependency Contracts` section. If the contract is
+missing or stale, the worker must stop and report the mismatch instead of using
+old draft assumptions.
 
 After export, review and either commit the workerpool metadata or keep it ignored
 locally before running `cowp start`, because the execution layer expects a clean

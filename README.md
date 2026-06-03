@@ -24,6 +24,7 @@ Initialize a target repository:
 
 ```powershell
 cowp init --repo G:\workspace\Project
+cowp doctor --repo G:\workspace\Project
 ```
 
 Shape a feature before workers can execute it:
@@ -31,10 +32,12 @@ Shape a feature before workers can execute it:
 ```powershell
 cowp plan init --repo G:\workspace\Project --feature FEATURE-001 --title "short feature title"
 cowp plan validate --repo G:\workspace\Project --plan .codex-workerpool\plans\FEATURE-001.plan.json
+cowp plan next --repo G:\workspace\Project --plan .codex-workerpool\plans\FEATURE-001.plan.json
 cowp plan export-ready `
   --repo G:\workspace\Project `
   --plan .codex-workerpool\plans\FEATURE-001.plan.json `
-  --manifest .codex-workerpool\tasks.json
+  --manifest .codex-workerpool\tasks.json `
+  --runnable-only
 ```
 
 Review and either commit the exported workerpool metadata, or keep
@@ -62,6 +65,8 @@ cowp finish --repo G:\workspace\Project --manifest .codex-workerpool\tasks.json 
 - A task should enter the manifest only after the planning Review Gate and Ready
   Gate pass.
 - `cowp plan export-ready` is the only normal path from planning into execution.
+- `cowp plan next` shows the next runnable batch and explains why later tasks
+  are blocked.
 - `exported` is only a planning status; execution status still lives in
   `runs_root/state.json`.
 - Multiple OpenCode workers may run concurrently when their `allowed_files` do
@@ -71,5 +76,23 @@ cowp finish --repo G:\workspace\Project --manifest .codex-workerpool\tasks.json 
   sent to OpenCode, including the allowed-file boundary and blocked rule.
 - `run` treats a zero-exit worker with no file changes as failure, so a
   conversational answer cannot pass as completed implementation.
+- `review` writes `runs_root/TASK-NNN/review.diff` so Codex review material is
+  reproducible, including untracked new files.
 - `finish` only stages reviewed files and refuses unreviewed changes.
+- `finish` records reviewed files, final diff snapshot, and acceptance command
+  results in `runs_root/state.json`.
 - Worker merge is intentionally serial and controlled by Codex.
+
+## Local Workflow Refresh
+
+If `.codex-workerpool/`, `RUNBOOK.md`, or `WORKER_PROTOCOL.md` are ignored
+locally, they can drift behind the installed WorkerPool version. Use:
+
+```powershell
+cowp doctor --repo G:\workspace\Project
+cowp init --repo G:\workspace\Project --refresh
+```
+
+`--refresh` updates protocol/runbook/template files but preserves an existing
+`.codex-workerpool/config.json`. Use `--force` only when you intentionally want
+to overwrite config and example files.
