@@ -197,7 +197,7 @@ def test_review_includes_untracked_allowed_file_diff(
     worktree = git_repo.parent / "repo.worktrees" / "TASK-001"
     doc = worktree / "docs" / "review-strategy.md"
     doc.parent.mkdir()
-    doc.write_text("review strategy\n", encoding="utf-8")
+    doc.write_text("review strategy\n知识点复习 𝄞\n", encoding="utf-8")
 
     assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
 
@@ -205,7 +205,9 @@ def test_review_includes_untracked_allowed_file_diff(
     assert "docs/review-strategy.md" in output
     assert "new file mode" in output
     review_diff = git_repo.parent / "repo.runs" / "TASK-001" / "review.diff"
-    assert "review strategy" in review_diff.read_text(encoding="utf-8")
+    review_diff_text = review_diff.read_text(encoding="utf-8")
+    assert "review strategy" in review_diff_text
+    assert "知识点复习 𝄞" in review_diff_text
 
 
 def test_start_clears_previous_failure_state(

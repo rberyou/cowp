@@ -19,7 +19,14 @@ class FinishResult:
 
 
 def run_checked(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+    proc = subprocess.run(
+        args,
+        cwd=cwd,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+    )
     if proc.returncode != 0:
         message = "\n".join(
             part for part in [f"command failed: {' '.join(args)}", proc.stdout, proc.stderr] if part
