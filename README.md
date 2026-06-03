@@ -26,19 +26,34 @@ Initialize a target repository:
 cowp init --repo G:\workspace\Project
 ```
 
-Validate and run a manifest:
+Shape a feature before workers can execute it:
 
 ```powershell
-cowp validate --repo G:\workspace\Project --manifest .codex-workerpool\tasks.example.json
-cowp start --repo G:\workspace\Project --manifest .codex-workerpool\tasks.example.json
-cowp run --repo G:\workspace\Project --manifest .codex-workerpool\tasks.example.json --all --max-parallel 2
+cowp plan init --repo G:\workspace\Project --feature FEATURE-001 --title "short feature title"
+cowp plan validate --repo G:\workspace\Project --plan .codex-workerpool\plans\FEATURE-001.plan.json
+cowp plan export-ready `
+  --repo G:\workspace\Project `
+  --plan .codex-workerpool\plans\FEATURE-001.plan.json `
+  --manifest .codex-workerpool\tasks.json
+```
+
+Review and either commit the exported workerpool metadata, or keep
+`.codex-workerpool/` ignored locally, before creating worktrees. The execution
+layer expects a clean controller worktree by default.
+
+Validate and run the exported manifest:
+
+```powershell
+cowp validate --repo G:\workspace\Project --manifest .codex-workerpool\tasks.json
+cowp start --repo G:\workspace\Project --manifest .codex-workerpool\tasks.json
+cowp run --repo G:\workspace\Project --manifest .codex-workerpool\tasks.json --all --max-parallel 2
 ```
 
 Review and finish one task at a time:
 
 ```powershell
-cowp review --repo G:\workspace\Project --manifest .codex-workerpool\tasks.example.json --task TASK-001
-cowp finish --repo G:\workspace\Project --manifest .codex-workerpool\tasks.example.json --task TASK-001 --reviewed-files src/example.py tests/test_example.py
+cowp review --repo G:\workspace\Project --manifest .codex-workerpool\tasks.json --task TASK-001
+cowp finish --repo G:\workspace\Project --manifest .codex-workerpool\tasks.json --task TASK-001 --reviewed-files src/example.py tests/test_example.py
 ```
 
 ## Model
@@ -46,6 +61,9 @@ cowp finish --repo G:\workspace\Project --manifest .codex-workerpool\tasks.examp
 - One task maps to one branch and one worktree.
 - A task should enter the manifest only after the planning Review Gate and Ready
   Gate pass.
+- `cowp plan export-ready` is the only normal path from planning into execution.
+- `exported` is only a planning status; execution status still lives in
+  `runs_root/state.json`.
 - Multiple OpenCode workers may run concurrently when their `allowed_files` do
   not overlap and their dependencies are satisfied.
 - OpenCode defaults to `--pure`.

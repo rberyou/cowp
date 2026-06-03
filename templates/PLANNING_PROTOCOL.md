@@ -60,6 +60,8 @@ Tasks can be marked:
 - `review`: design is mostly shaped but has not passed review
 - `blocked`: waiting for another decision or task
 - `ready`: passed review and can be copied into `.codex-workerpool/tasks.json`
+- `exported`: copied into the execution manifest; execution status still lives
+  in `runs_root/state.json`
 
 ### 5. Review Gate
 
@@ -91,6 +93,35 @@ A task is ready only when all of these are true:
 - Acceptance criteria are testable.
 - The task does not require the worker to choose architecture.
 - The worker prompt names non-goals and forbidden operations.
+- All open decisions and review findings are resolved.
+
+Use the machine-readable plan file as the source of truth:
+
+```powershell
+cowp plan validate --repo . --plan .codex-workerpool/plans/FEATURE-001.plan.json
+```
+
+## Export Rule
+
+Ready tasks are exported explicitly:
+
+```powershell
+cowp plan export-ready `
+  --repo . `
+  --plan .codex-workerpool/plans/FEATURE-001.plan.json `
+  --manifest .codex-workerpool/tasks.json
+```
+
+`export-ready` writes `.codex-workerpool/tasks/TASK-NNN.md`, updates
+`.codex-workerpool/tasks.json`, and changes the planning task status to
+`exported`.
+
+For tasks with `depends_on`, export requires dependency tasks to be `merged` in
+the execution state unless `--ignore-dependency-state` is passed.
+
+After export, review and either commit the workerpool metadata or keep it ignored
+locally before running `cowp start`, because the execution layer expects a clean
+controller worktree by default.
 
 ## Worker Manifest Rule
 

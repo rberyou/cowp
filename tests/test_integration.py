@@ -18,7 +18,79 @@ def test_init_writes_planning_templates(git_repo: Path, fake_opencode: Path):
     assert feature_template.is_file()
     assert "Review Gate" in planning_protocol.read_text(encoding="utf-8")
     assert "Ready Gate" in planning_protocol.read_text(encoding="utf-8")
-    assert "Reviewed Task Breakdown" in feature_template.read_text(encoding="utf-8")
+    assert "Ready Task Breakdown" in feature_template.read_text(encoding="utf-8")
+
+
+def test_plan_exported_manifest_runs_execution_flow(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    plan_path = git_repo / ".codex-workerpool" / "plans" / "FEATURE-001.plan.json"
+    write_json(
+        plan_path,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "planned task",
+            "status": "draft",
+            "markdown": ".codex-workerpool/plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "change example from plan",
+                    "status": "ready",
+                    "worker": "default",
+                    "depends_on": [],
+                    "allowed_files": ["src/example.py"],
+                    "acceptance_command": None,
+                    "prompt": "WRITE src/example.py",
+                }
+            ],
+        },
+    )
+    (git_repo / ".codex-workerpool" / "plans" / "FEATURE-001.md").write_text("# FEATURE-001\n", encoding="utf-8")
+
+    assert main(["plan", "validate", "--repo", str(git_repo), "--plan", str(plan_path)]) == 0
+    assert (
+        main(
+            [
+                "plan",
+                "export-ready",
+                "--repo",
+                str(git_repo),
+                "--plan",
+                str(plan_path),
+                "--manifest",
+                ".codex-workerpool/tasks.json",
+            ]
+        )
+        == 0
+    )
+    run(["git", "add", ".codex-workerpool"], git_repo)
+    run(["git", "commit", "-m", "export planned task"], git_repo)
+
+    manifest = git_repo / ".codex-workerpool" / "tasks.json"
+    assert main(["validate", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    assert (
+        main(
+            [
+                "finish",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--reviewed-files",
+                "src/example.py",
+            ]
+        )
+        == 0
+    )
 
 
 def test_start_run_status_review_finish_with_fake_opencode(

@@ -29,10 +29,44 @@ until it has passed both:
 Use `.codex-workerpool/plans/FEATURE-001.example.md` as a starting point for
 feature planning.
 
-## 3. Define Executable Tasks
+Create a machine-readable feature plan:
 
-Write task prompts under `.codex-workerpool/tasks/` and list tasks in a JSON
-manifest such as `.codex-workerpool/tasks.example.json`.
+```powershell
+cowp plan init `
+  --repo . `
+  --feature FEATURE-001 `
+  --title "short feature title"
+```
+
+Keep `.codex-workerpool/plans/FEATURE-001.plan.json` as the source of truth for
+task status, dependencies, allowed files, and worker prompts. Markdown remains
+the place for discussion, design notes, and review notes.
+
+Validate the plan before exporting:
+
+```powershell
+cowp plan validate `
+  --repo . `
+  --plan .codex-workerpool/plans/FEATURE-001.plan.json
+```
+
+## 3. Export Ready Tasks
+
+Only tasks marked `ready` are exported into the execution layer:
+
+```powershell
+cowp plan export-ready `
+  --repo . `
+  --plan .codex-workerpool/plans/FEATURE-001.plan.json `
+  --manifest .codex-workerpool/tasks.json
+```
+
+This writes task prompts under `.codex-workerpool/tasks/`, updates
+`.codex-workerpool/tasks.json`, and marks exported planning tasks as `exported`.
+
+`exported` only means the task entered the execution manifest. It does not mean a
+worktree exists, a worker ran, or the branch merged. Use `cowp status` for
+execution state.
 
 Each task must define:
 
@@ -46,10 +80,19 @@ Each task must define:
 
 Draft, review, or blocked tasks must stay in `.codex-workerpool/plans/`.
 
+For dependency chains, export only the next runnable batch. By default,
+`export-ready` refuses to export tasks whose dependencies are not `merged` in the
+execution state.
+
+After export, review and either commit the workerpool metadata or keep
+`.codex-workerpool/` ignored locally before starting worktrees. `cowp start`
+expects a clean controller worktree unless `--skip-clean-check` is used
+deliberately.
+
 ## 4. Validate
 
 ```powershell
-cowp validate --repo . --manifest .codex-workerpool/tasks.example.json
+cowp validate --repo . --manifest .codex-workerpool/tasks.json
 ```
 
 Warnings for overlapping `allowed_files` are allowed; those tasks will not run at
@@ -58,7 +101,7 @@ the same time by default.
 ## 5. Start Worktrees
 
 ```powershell
-cowp start --repo . --manifest .codex-workerpool/tasks.example.json
+cowp start --repo . --manifest .codex-workerpool/tasks.json
 ```
 
 Prepare each worktree with the repository-specific environment setup. `cowp`
@@ -68,7 +111,7 @@ language-specific build artifacts.
 ## 6. Run Workers
 
 ```powershell
-cowp run --repo . --manifest .codex-workerpool/tasks.example.json --all --max-parallel 2
+cowp run --repo . --manifest .codex-workerpool/tasks.json --all --max-parallel 2
 ```
 
 OpenCode runs in pure mode by default. Logs are written under the configured
@@ -88,7 +131,7 @@ task prompt or worker configuration before rerunning.
 Codex reviews one task at a time:
 
 ```powershell
-cowp review --repo . --manifest .codex-workerpool/tasks.example.json --task TASK-001
+cowp review --repo . --manifest .codex-workerpool/tasks.json --task TASK-001
 ```
 
 If review passes:
@@ -96,7 +139,7 @@ If review passes:
 ```powershell
 cowp finish `
   --repo . `
-  --manifest .codex-workerpool/tasks.example.json `
+  --manifest .codex-workerpool/tasks.json `
   --task TASK-001 `
   --reviewed-files src/example.py tests/test_example.py
 ```

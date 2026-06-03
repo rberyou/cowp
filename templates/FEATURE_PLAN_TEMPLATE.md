@@ -4,6 +4,12 @@ Status: `draft`
 
 Source: `<user request, document path, ticket, or discussion>`
 
+Machine-readable source:
+
+```text
+.codex-workerpool/plans/FEATURE-NNN.plan.json
+```
+
 ## Idea
 
 - Problem statement:
@@ -30,13 +36,15 @@ Source: `<user request, document path, ticket, or discussion>`
 
 ### Review Round 1 Findings
 
-- `<P1/P2/P3 finding and resolution>`
+- `F-001 <P1/P2/P3 finding>`
+- Resolution:
+- Status: `open` or `resolved`
 
 ### Review Result
 
 - `<No unresolved findings for TASK-...>` or `<remaining blockers>`
 
-## Reviewed Task Breakdown
+## Ready Task Breakdown
 
 ### TASK-NNN task title
 
@@ -59,3 +67,20 @@ Out of scope:
 Acceptance:
 
 - `<test command or manual check>`
+
+Worker prompt requirements:
+
+- Include exact implementation scope.
+- Include allowed files.
+- Include blocked rule for required files outside allowed files.
+- Include non-goals.
+- Include acceptance command or repository default.
+
+Export only after Review Gate and Ready Gate pass:
+
+```powershell
+cowp plan export-ready `
+  --repo . `
+  --plan .codex-workerpool/plans/FEATURE-NNN.plan.json `
+  --manifest .codex-workerpool/tasks.json
+```

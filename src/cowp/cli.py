@@ -27,6 +27,13 @@ from cowp.gitops import (
     task_status,
     task_worktree,
 )
+from cowp.planning import (
+    export_ready_tasks,
+    init_plan,
+    load_plan,
+    plan_status_lines,
+    validate_plan,
+)
 from cowp.runner import RunnerError, run_tasks
 from cowp.state import StateStore
 
@@ -49,6 +56,35 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--repo", required=True)
     init.add_argument("--force", action="store_true")
     init.set_defaults(func=cmd_init)
+
+    plan = sub.add_parser("plan", help="manage requirement shaping plans")
+    plan_sub = plan.add_subparsers(dest="plan_command", required=True)
+
+    plan_init = plan_sub.add_parser("init", help="create a feature planning draft")
+    plan_init.add_argument("--repo", required=True)
+    plan_init.add_argument("--feature", required=True)
+    plan_init.add_argument("--title", required=True)
+    plan_init.add_argument("--force", action="store_true")
+    plan_init.set_defaults(func=cmd_plan_init)
+
+    plan_status = plan_sub.add_parser("status", help="show planning and execution status")
+    plan_status.add_argument("--repo", required=True)
+    plan_status.add_argument("--plan", required=True)
+    plan_status.set_defaults(func=cmd_plan_status)
+
+    plan_validate = plan_sub.add_parser("validate", help="validate a feature plan")
+    plan_validate.add_argument("--repo", required=True)
+    plan_validate.add_argument("--plan", required=True)
+    plan_validate.set_defaults(func=cmd_plan_validate)
+
+    plan_export = plan_sub.add_parser("export-ready", help="export ready planning tasks into the execution manifest")
+    plan_export.add_argument("--repo", required=True)
+    plan_export.add_argument("--plan", required=True)
+    plan_export.add_argument("--manifest", required=True)
+    plan_export.add_argument("--task")
+    plan_export.add_argument("--force", action="store_true")
+    plan_export.add_argument("--ignore-dependency-state", action="store_true")
+    plan_export.set_defaults(func=cmd_plan_export_ready)
 
     validate = sub.add_parser("validate", help="validate config and manifest")
     add_repo_manifest(validate)
@@ -122,6 +158,48 @@ def cmd_validate(args: argparse.Namespace) -> int:
     result = validate_project(config, manifest)
     print_validation(result)
     return 0 if result.ok else 1
+
+
+def cmd_plan_init(args: argparse.Namespace) -> int:
+    json_path, markdown_path = init_plan(args.repo, args.feature, args.title, force=args.force)
+    print(f"created plan JSON: {json_path}")
+    print(f"created plan Markdown: {markdown_path}")
+    return 0
+
+
+def cmd_plan_status(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo)
+    plan = load_plan(config.repo, args.plan)
+    for line in plan_status_lines(config, plan):
+        print(line)
+    return 0
+
+
+def cmd_plan_validate(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo)
+    plan = load_plan(config.repo, args.plan)
+    result = validate_plan(config, plan)
+    print_validation(result)
+    return 0 if result.ok else 1
+
+
+def cmd_plan_export_ready(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo)
+    plan = load_plan(config.repo, args.plan)
+    exported = export_ready_tasks(
+        config=config,
+        plan=plan,
+        manifest_path=args.manifest,
+        task_id=args.task,
+        force=args.force,
+        ignore_dependency_state=args.ignore_dependency_state,
+    )
+    if not exported:
+        print("no ready tasks exported")
+        return 0
+    for task_id in exported:
+        print(f"{task_id}: exported")
+    return 0
 
 
 def cmd_start(args: argparse.Namespace) -> int:
