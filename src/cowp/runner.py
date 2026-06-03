@@ -183,6 +183,9 @@ def effective_prompt(config: ProjectConfig, task: ManifestTask, raw_prompt: str)
 Follow every boundary below. This is an execution task, not a request to write
 or improve these instructions.
 
+The complete task instructions are embedded in this prompt. Do not search for a
+separate task spec file in the worktree.
+
 ## Non-Negotiable Boundary
 
 You may modify only the files listed under Allowed Files.
@@ -211,13 +214,13 @@ Do not commit, merge, rebase, push, or create branches.
 {acceptance}
 ```
 
-## Worker Protocol
-
-{protocol.strip()}
-
-## Task Prompt
+## Task Instructions
 
 {raw_prompt.strip()}
+
+## Repository Worker Protocol
+
+{protocol.strip()}
 """
     return guard.rstrip() + "\n"
 

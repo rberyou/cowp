@@ -51,6 +51,7 @@ def test_start_run_status_review_finish_with_fake_opencode(
     assert "BLOCKED: required file outside allowed_files" in effective_text
     assert "`src/example.py`" in effective_text
     assert "# TASK-001 change example" in effective_text
+    assert effective_text.index("## Task Instructions") < effective_text.index("## Repository Worker Protocol")
     assert main(["status", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
     assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
     assert main(
