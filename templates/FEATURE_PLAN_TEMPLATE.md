@@ -7,8 +7,12 @@ Source: `<user request, document path, ticket, or discussion>`
 Machine-readable source:
 
 ```text
-.codex-workerpool/plans/FEATURE-NNN.plan.json
+plans/FEATURE-NNN.plan.json
 ```
+
+Feature dependencies:
+
+- `depends_on_features`: none
 
 ## Idea
 
@@ -85,6 +89,7 @@ Export only after Review Gate and Ready Gate pass:
 ```powershell
 cowp plan export-ready `
   --repo . `
-  --plan .codex-workerpool/plans/FEATURE-NNN.plan.json `
-  --manifest .codex-workerpool/tasks.json
+  --pool-dir ..\Project.workerpool `
+  --plan plans/FEATURE-NNN.plan.json `
+  --manifest tasks.json
 ```

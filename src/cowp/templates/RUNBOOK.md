@@ -2,6 +2,16 @@
 
 This repository uses `cowp` to run a Codex-controlled OpenCode worker pool.
 
+Prefer an external control directory for production work:
+
+```powershell
+cowp init --repo . --pool-dir ..\Project.workerpool
+```
+
+All examples below can use `--pool-dir ..\Project.workerpool`. When `--pool-dir`
+is omitted, `cowp` uses the legacy `.codex-workerpool` directory in the target
+repository.
+
 ## 1. Prepare Controller Worktree
 
 Start from a clean controller worktree:
@@ -14,31 +24,31 @@ Run this repository's baseline checks before creating task worktrees.
 
 ## 2. Shape Requirements
 
-Use `.codex-workerpool/plans/PLANNING_PROTOCOL.md` before creating executable
-tasks.
+Use `plans/PLANNING_PROTOCOL.md` in the control directory before creating
+executable tasks.
 
 Keep rough ideas, feature design, review findings, and draft task splits under
-`.codex-workerpool/plans/`. A task should not be copied into the worker manifest
-until it has passed both:
+the control directory's `plans/`. A task should not be copied into the worker
+manifest until it has passed both:
 
 - Review Gate: no unresolved design, boundary, dependency, or test coverage
   findings.
 - Ready Gate: the task has explicit dependencies, allowed files, non-goals, and
   testable acceptance criteria.
 
-Use `.codex-workerpool/plans/FEATURE-001.example.md` as a starting point for
-feature planning.
+Use `plans/FEATURE-001.example.md` as a starting point for feature planning.
 
 Create a machine-readable feature plan:
 
 ```powershell
 cowp plan init `
   --repo . `
+  --pool-dir ..\Project.workerpool `
   --feature FEATURE-001 `
   --title "short feature title"
 ```
 
-Keep `.codex-workerpool/plans/FEATURE-001.plan.json` as the source of truth for
+Keep `plans/FEATURE-001.plan.json` as the source of truth for
 task status, dependencies, allowed files, and worker prompts. Markdown remains
 the place for discussion, design notes, and review notes.
 
@@ -47,7 +57,14 @@ Validate the plan before exporting:
 ```powershell
 cowp plan validate `
   --repo . `
-  --plan .codex-workerpool/plans/FEATURE-001.plan.json
+  --pool-dir ..\Project.workerpool `
+  --plan plans/FEATURE-001.plan.json
+```
+
+Use the backlog view when multiple features are being shaped or executed:
+
+```powershell
+cowp backlog status --repo . --pool-dir ..\Project.workerpool
 ```
 
 ## 3. Export Ready Tasks
@@ -57,7 +74,8 @@ Inspect the next runnable batch before export:
 ```powershell
 cowp plan next `
   --repo . `
-  --plan .codex-workerpool/plans/FEATURE-001.plan.json
+  --pool-dir ..\Project.workerpool `
+  --all
 ```
 
 Only tasks marked `ready` are exported into the execution layer:
@@ -65,13 +83,14 @@ Only tasks marked `ready` are exported into the execution layer:
 ```powershell
 cowp plan export-ready `
   --repo . `
-  --plan .codex-workerpool/plans/FEATURE-001.plan.json `
-  --manifest .codex-workerpool/tasks.json `
+  --pool-dir ..\Project.workerpool `
+  --all `
+  --manifest tasks.json `
   --runnable-only
 ```
 
-This writes task prompts under `.codex-workerpool/tasks/`, updates
-`.codex-workerpool/tasks.json`, and marks exported planning tasks as `exported`.
+This writes task prompts under the control directory's `tasks/`, updates
+`tasks.json`, and marks exported planning tasks as `exported`.
 
 `exported` only means the task entered the execution manifest. It does not mean a
 worktree exists, a worker ran, or the branch merged. Use `cowp status` for
@@ -87,25 +106,28 @@ Each task must define:
 - optional `acceptance_command`
 - optional `depends_on`
 
-Draft, review, or blocked tasks must stay in `.codex-workerpool/plans/`.
+Draft, review, or blocked tasks must stay in `plans/`.
 
 For dependency chains, export only the next runnable batch. By default,
 `export-ready` refuses to export tasks whose dependencies are not `merged` in the
 execution state.
 
+For feature-level dependencies, add `depends_on_features` to the plan JSON. A
+feature dependency is satisfied only when the upstream feature status is `done`.
+
 For downstream tasks, record the dependency contract in the plan before marking
 the task ready. Exported prompts include those contracts so workers do not rely
 on stale draft endpoints, schemas, or helper behavior.
 
-After export, review and either commit the workerpool metadata or keep
-`.codex-workerpool/` ignored locally before starting worktrees. `cowp start`
-expects a clean controller worktree unless `--skip-clean-check` is used
-deliberately.
+In legacy mode, review and either commit the workerpool metadata or keep
+`.codex-workerpool/` ignored locally before starting worktrees. In external pool
+mode, control files stay outside the project repository. `cowp start` expects a
+clean controller worktree unless `--skip-clean-check` is used deliberately.
 
 ## 4. Validate
 
 ```powershell
-cowp validate --repo . --manifest .codex-workerpool/tasks.json
+cowp validate --repo . --pool-dir ..\Project.workerpool --manifest tasks.json
 ```
 
 Warnings for overlapping `allowed_files` are allowed; those tasks will not run at
@@ -114,7 +136,7 @@ the same time by default.
 ## 5. Start Worktrees
 
 ```powershell
-cowp start --repo . --manifest .codex-workerpool/tasks.json
+cowp start --repo . --pool-dir ..\Project.workerpool --manifest tasks.json
 ```
 
 Prepare each worktree with the repository-specific environment setup. `cowp`
@@ -124,7 +146,7 @@ language-specific build artifacts.
 ## 6. Run Workers
 
 ```powershell
-cowp run --repo . --manifest .codex-workerpool/tasks.json --all --max-parallel 2
+cowp run --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --all --max-parallel 2
 ```
 
 OpenCode runs in pure mode by default. Logs are written under the configured
@@ -144,7 +166,7 @@ task prompt or worker configuration before rerunning.
 Codex reviews one task at a time:
 
 ```powershell
-cowp review --repo . --manifest .codex-workerpool/tasks.json --task TASK-001
+cowp review --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --task TASK-001
 ```
 
 `review` prints and stores git status, diff stat, and full diff under
@@ -155,7 +177,8 @@ If review passes:
 ```powershell
 cowp finish `
   --repo . `
-  --manifest .codex-workerpool/tasks.json `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
   --task TASK-001 `
   --reviewed-files src/example.py tests/test_example.py
 ```
@@ -171,9 +194,9 @@ If this repository keeps WorkerPool files ignored locally, check drift after
 upgrading WorkerPool:
 
 ```powershell
-cowp doctor --repo .
-cowp init --repo . --refresh
+cowp doctor --repo . --pool-dir ..\Project.workerpool
+cowp init --repo . --pool-dir ..\Project.workerpool --refresh
 ```
 
-`--refresh` preserves `.codex-workerpool/config.json` and updates protocol,
-runbook, and planning templates.
+`--refresh` preserves `config.json` and updates protocol, runbook, and planning
+templates.

@@ -6,7 +6,15 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from cowp.config import Manifest, ManifestTask, ProjectConfig, paths_overlap, prompt_text, worker_for_task
+from cowp.config import (
+    Manifest,
+    ManifestTask,
+    ProjectConfig,
+    paths_overlap,
+    prompt_text,
+    worker_for_task,
+    worker_protocol_path,
+)
 from cowp.gitops import task_worktree
 from cowp.state import StateStore
 
@@ -173,7 +181,7 @@ def _dependencies_satisfied(task: ManifestTask, states: dict[str, object]) -> bo
 
 
 def effective_prompt(config: ProjectConfig, task: ManifestTask, raw_prompt: str) -> str:
-    protocol_path = config.repo / "WORKER_PROTOCOL.md"
+    protocol_path = worker_protocol_path(config)
     if protocol_path.is_file():
         protocol = protocol_path.read_text(encoding="utf-8")
     else:

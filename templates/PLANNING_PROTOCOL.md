@@ -2,7 +2,8 @@
 
 This protocol defines how an idea becomes an executable OpenCode worker task.
 
-Only tasks that pass the Review Gate and Ready Gate should be copied into `.codex-workerpool/tasks.json`.
+Only tasks that pass the Review Gate and Ready Gate should be copied into the
+execution manifest, usually `tasks.json` in the WorkerPool control directory.
 
 ## Stages
 
@@ -61,9 +62,13 @@ Tasks can be marked:
 - `draft`: requirement or design is still open
 - `review`: design is mostly shaped but has not passed review
 - `blocked`: waiting for another decision or task
-- `ready`: passed review and can be copied into `.codex-workerpool/tasks.json`
+- `ready`: passed review and can be copied into the execution manifest
 - `exported`: copied into the execution manifest; execution status still lives
   in `runs_root/state.json`
+- `done`: feature-level terminal state; all non-dropped tasks have merged
+
+Feature plans may also use `depends_on_features`. A feature dependency is
+satisfied only when the dependency feature status is `done`.
 
 ### 5. Review Gate
 
@@ -101,7 +106,14 @@ A task is ready only when all of these are true:
 Use the machine-readable plan file as the source of truth:
 
 ```powershell
-cowp plan validate --repo . --plan .codex-workerpool/plans/FEATURE-001.plan.json
+cowp plan validate --repo . --plan plans/FEATURE-001.plan.json
+```
+
+For an external control directory, use pool-relative paths:
+
+```powershell
+cowp plan validate --repo . --pool-dir ..\Project.workerpool --plan plans/FEATURE-001.plan.json
+cowp backlog status --repo . --pool-dir ..\Project.workerpool
 ```
 
 ## Export Rule
@@ -111,20 +123,20 @@ Ready tasks are exported explicitly:
 Before export, inspect the next runnable batch:
 
 ```powershell
-cowp plan next --repo . --plan .codex-workerpool/plans/FEATURE-001.plan.json
+cowp plan next --repo . --pool-dir ..\Project.workerpool --all
 ```
 
 ```powershell
 cowp plan export-ready `
   --repo . `
-  --plan .codex-workerpool/plans/FEATURE-001.plan.json `
-  --manifest .codex-workerpool/tasks.json `
+  --pool-dir ..\Project.workerpool `
+  --all `
+  --manifest tasks.json `
   --runnable-only
 ```
 
-`export-ready` writes `.codex-workerpool/tasks/TASK-NNN.md`, updates
-`.codex-workerpool/tasks.json`, and changes the planning task status to
-`exported`.
+`export-ready` writes `tasks/TASK-NNN.md`, updates `tasks.json`, and changes the
+planning task status to `exported`.
 
 For tasks with `depends_on`, export requires dependency tasks to be `merged` in
 the execution state unless `--ignore-dependency-state` is passed.
@@ -142,13 +154,13 @@ controller worktree by default.
 
 ## Worker Manifest Rule
 
-Draft, review, or blocked tasks stay in `.codex-workerpool/plans/`.
+Draft, review, or blocked tasks stay in `plans/`.
 
 Only ready tasks are copied into:
 
 ```text
-.codex-workerpool/tasks.json
-.codex-workerpool/tasks/TASK-NNN.md
+tasks.json
+tasks/TASK-NNN.md
 ```
 
 This prevents `cowp start` or `cowp run --all` from executing ambiguous work.

@@ -21,6 +21,18 @@ def test_init_writes_planning_templates(git_repo: Path, fake_opencode: Path):
     assert "Ready Task Breakdown" in feature_template.read_text(encoding="utf-8")
 
 
+def test_external_pool_init_creates_no_control_files_in_repo(git_repo: Path, fake_opencode: Path):
+    pool = git_repo.parent / "repo.workerpool"
+
+    assert main(["init", "--repo", str(git_repo), "--pool-dir", str(pool)]) == 0
+
+    assert (pool / "config.json").is_file()
+    assert (pool / "WORKER_PROTOCOL.md").is_file()
+    assert (pool / "plans" / "PLANNING_PROTOCOL.md").is_file()
+    assert not (git_repo / ".codex-workerpool").exists()
+    assert not (git_repo / "WORKER_PROTOCOL.md").exists()
+
+
 def test_init_refresh_preserves_config_and_updates_templates(git_repo: Path, workerpool_config: Path):
     config_path = git_repo / ".codex-workerpool" / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -63,7 +75,7 @@ def test_plan_exported_manifest_runs_execution_flow(
             "review_findings": [],
             "tasks": [
                 {
-                    "id": "TASK-001",
+                    "id": "TASK-101",
                     "title": "change example from plan",
                     "status": "ready",
                     "worker": "default",
@@ -109,13 +121,95 @@ def test_plan_exported_manifest_runs_execution_flow(
                 "--manifest",
                 str(manifest),
                 "--task",
-                "TASK-001",
+                "TASK-101",
                 "--reviewed-files",
                 "src/example.py",
             ]
         )
         == 0
     )
+
+
+def test_external_pool_plan_exported_manifest_runs_execution_flow(
+    git_repo: Path,
+    fake_opencode: Path,
+):
+    pool = git_repo.parent / "repo.workerpool"
+    assert main(["init", "--repo", str(git_repo), "--pool-dir", str(pool)]) == 0
+    plan_path = pool / "plans" / "FEATURE-001.plan.json"
+    write_json(
+        plan_path,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "external planned task",
+            "status": "ready",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-101",
+                    "title": "change example from external pool",
+                    "status": "ready",
+                    "worker": "default",
+                    "depends_on": [],
+                    "allowed_files": ["src/example.py"],
+                    "acceptance_command": None,
+                    "prompt": "WRITE src/example.py",
+                }
+            ],
+        },
+    )
+    (pool / "plans" / "FEATURE-001.md").write_text("# FEATURE-001\n", encoding="utf-8")
+
+    assert main(["plan", "validate", "--repo", str(git_repo), "--pool-dir", str(pool), "--plan", "plans/FEATURE-001.plan.json"]) == 0
+    assert (
+        main(
+            [
+                "plan",
+                "export-ready",
+                "--repo",
+                str(git_repo),
+                "--pool-dir",
+                str(pool),
+                "--plan",
+                "plans/FEATURE-001.plan.json",
+                "--manifest",
+                "tasks.json",
+            ]
+        )
+        == 0
+    )
+
+    manifest = pool / "tasks.json"
+    manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+    assert manifest_data["tasks"][0]["feature_id"] == "FEATURE-001"
+    assert manifest_data["tasks"][0]["prompt_file"] == "tasks/TASK-101.md"
+    assert main(["validate", "--repo", str(git_repo), "--pool-dir", str(pool), "--manifest", "tasks.json"]) == 0
+    assert main(["start", "--repo", str(git_repo), "--pool-dir", str(pool), "--manifest", "tasks.json"]) == 0
+    assert main(["run", "--repo", str(git_repo), "--pool-dir", str(pool), "--manifest", "tasks.json", "--all"]) == 0
+    assert (
+        main(
+            [
+                "finish",
+                "--repo",
+                str(git_repo),
+                "--pool-dir",
+                str(pool),
+                "--manifest",
+                "tasks.json",
+                "--task",
+                "TASK-101",
+                "--reviewed-files",
+                "src/example.py",
+            ]
+        )
+        == 0
+    )
+    assert not (git_repo / ".codex-workerpool").exists()
+    assert not (pool / "worktrees" / "TASK-101").exists()
+    assert (pool / "runs" / "state.json").is_file()
 
 
 def test_start_run_status_review_finish_with_fake_opencode(

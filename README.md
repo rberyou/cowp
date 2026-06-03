@@ -8,9 +8,19 @@ records logs/state, and enforces a review gate before commit and merge.
 The workflow has two layers:
 
 - Planning layer: ideas, clarification, design, task split, Review Gate, and
-  Ready Gate live under `.codex-workerpool/plans/`.
-- Execution layer: only ready tasks are copied into `.codex-workerpool/tasks.json`
-  and run by `cowp`.
+  Ready Gate live under the WorkerPool control directory.
+- Execution layer: only ready tasks are copied into the control directory's
+  `tasks.json` and run by `cowp`.
+
+WorkerPool can run in two layouts:
+
+- External pool layout, recommended for production:
+  `cowp init --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool`
+- Legacy in-repo layout, still supported:
+  `cowp init --repo G:\workspace\Project`
+
+In external pool mode, project files stay out of the target repository. Control
+files, plans, manifests, runs, and task worktrees live under `--pool-dir`.
 
 ## Quick Start
 
@@ -23,40 +33,41 @@ python -m venv .venv
 Initialize a target repository:
 
 ```powershell
-cowp init --repo G:\workspace\Project
-cowp doctor --repo G:\workspace\Project
+cowp init --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool
+cowp doctor --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool
 ```
 
 Shape a feature before workers can execute it:
 
 ```powershell
-cowp plan init --repo G:\workspace\Project --feature FEATURE-001 --title "short feature title"
-cowp plan validate --repo G:\workspace\Project --plan .codex-workerpool\plans\FEATURE-001.plan.json
-cowp plan next --repo G:\workspace\Project --plan .codex-workerpool\plans\FEATURE-001.plan.json
+cowp plan init --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --feature FEATURE-001 --title "short feature title"
+cowp plan validate --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --plan plans\FEATURE-001.plan.json
+cowp backlog status --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool
+cowp plan next --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --all
 cowp plan export-ready `
   --repo G:\workspace\Project `
-  --plan .codex-workerpool\plans\FEATURE-001.plan.json `
-  --manifest .codex-workerpool\tasks.json `
+  --pool-dir G:\workspace\Project.workerpool `
+  --all `
+  --manifest tasks.json `
   --runnable-only
 ```
 
-Review and either commit the exported workerpool metadata, or keep
-`.codex-workerpool/` ignored locally, before creating worktrees. The execution
-layer expects a clean controller worktree by default.
+The execution layer expects a clean controller worktree by default. External
+pool mode avoids dirtying the project repo with WorkerPool metadata.
 
 Validate and run the exported manifest:
 
 ```powershell
-cowp validate --repo G:\workspace\Project --manifest .codex-workerpool\tasks.json
-cowp start --repo G:\workspace\Project --manifest .codex-workerpool\tasks.json
-cowp run --repo G:\workspace\Project --manifest .codex-workerpool\tasks.json --all --max-parallel 2
+cowp validate --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json
+cowp start --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json
+cowp run --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --all --max-parallel 2
 ```
 
 Review and finish one task at a time:
 
 ```powershell
-cowp review --repo G:\workspace\Project --manifest .codex-workerpool\tasks.json --task TASK-001
-cowp finish --repo G:\workspace\Project --manifest .codex-workerpool\tasks.json --task TASK-001 --reviewed-files src/example.py tests/test_example.py
+cowp review --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001
+cowp finish --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001 --reviewed-files src/example.py tests/test_example.py
 ```
 
 ## Model
@@ -67,6 +78,12 @@ cowp finish --repo G:\workspace\Project --manifest .codex-workerpool\tasks.json 
 - `cowp plan export-ready` is the only normal path from planning into execution.
 - `cowp plan next` shows the next runnable batch and explains why later tasks
   are blocked.
+- `cowp plan next --all` computes the next runnable batch across all feature
+  plans in the pool.
+- Features may depend on other features with `depends_on_features`; those
+  dependencies are satisfied only when the upstream feature status is `done`.
+- `cowp backlog status` prints a Kanban-style overview with derived `Clarify`,
+  running, failed, review-needed, blocked, and merged columns.
 - `exported` is only a planning status; execution status still lives in
   `runs_root/state.json`.
 - Multiple OpenCode workers may run concurrently when their `allowed_files` do
@@ -85,14 +102,27 @@ cowp finish --repo G:\workspace\Project --manifest .codex-workerpool\tasks.json 
 
 ## Local Workflow Refresh
 
-If `.codex-workerpool/`, `RUNBOOK.md`, or `WORKER_PROTOCOL.md` are ignored
-locally, they can drift behind the installed WorkerPool version. Use:
+If WorkerPool files are ignored locally, they can drift behind the installed
+WorkerPool version. Use:
 
 ```powershell
-cowp doctor --repo G:\workspace\Project
-cowp init --repo G:\workspace\Project --refresh
+cowp doctor --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool
+cowp init --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --refresh
 ```
 
 `--refresh` updates protocol/runbook/template files but preserves an existing
-`.codex-workerpool/config.json`. Use `--force` only when you intentionally want
-to overwrite config and example files.
+`config.json`. Use `--force` only when you intentionally want to overwrite
+config and example files.
+
+## Legacy Layout
+
+Omit `--pool-dir` to keep using the original `.codex-workerpool` layout:
+
+```powershell
+cowp init --repo G:\workspace\Project
+cowp plan export-ready --repo G:\workspace\Project --plan plans\FEATURE-001.plan.json --manifest tasks.json
+cowp run --repo G:\workspace\Project --manifest tasks.json --all
+```
+
+Legacy manifests that still reference `.codex-workerpool/tasks/TASK-NNN.md`
+remain valid.

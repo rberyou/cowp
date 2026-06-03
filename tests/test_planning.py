@@ -224,7 +224,8 @@ def test_export_ready_writes_manifest_prompt_and_marks_exported(
     assert "WRITE src/example.py" in prompt
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["tasks"][0]["id"] == "TASK-001"
-    assert manifest["tasks"][0]["prompt_file"] == ".codex-workerpool/tasks/TASK-001.md"
+    assert manifest["tasks"][0]["feature_id"] == "FEATURE-001"
+    assert manifest["tasks"][0]["prompt_file"] == "tasks/TASK-001.md"
     plan = json.loads(path.read_text(encoding="utf-8"))
     assert plan["tasks"][0]["status"] == "exported"
     assert not (git_repo.parent / "repo.runs" / "state.json").exists()
@@ -485,9 +486,305 @@ def test_plan_exported_status_does_not_change_execution_state(
     assert not (git_repo.parent / "repo.runs" / "state.json").exists()
 
 
+def test_plan_next_all_blocks_feature_dependency_until_done(
+    git_repo: Path,
+    workerpool_config: Path,
+    capsys,
+):
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "foundation",
+            "status": "ready",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [],
+        },
+    )
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-002",
+        {
+            "feature_id": "FEATURE-002",
+            "title": "dependent",
+            "status": "ready",
+            "depends_on_features": ["FEATURE-001"],
+            "markdown": "plans/FEATURE-002.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-002",
+                    "title": "dependent task",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                }
+            ],
+        },
+    )
+
+    assert main(["plan", "next", "--repo", str(git_repo), "--all"]) == 0
+
+    output = capsys.readouterr().out
+    assert "FEATURE-002 ready" in output
+    assert "feature_blockers: depends on FEATURE-001" in output
+    assert "TASK-002 blocked: depends on FEATURE-001" in output
+
+    feature_001 = git_repo / ".codex-workerpool" / "plans" / "FEATURE-001.plan.json"
+    data = json.loads(feature_001.read_text(encoding="utf-8"))
+    data["status"] = "done"
+    write_json(feature_001, data)
+
+    assert main(["plan", "next", "--repo", str(git_repo), "--all"]) == 0
+
+    output = capsys.readouterr().out
+    assert "TASK-002 runnable" in output
+
+
+def test_export_ready_all_exports_independent_features_with_feature_id(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    config_path = git_repo / ".codex-workerpool" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["workers"][0]["max_parallel"] = 2
+    write_json(config_path, config)
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "one",
+            "status": "ready",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "first",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                }
+            ],
+        },
+    )
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-002",
+        {
+            "feature_id": "FEATURE-002",
+            "title": "two",
+            "status": "ready",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-002.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-002",
+                    "title": "second",
+                    "status": "ready",
+                    "allowed_files": ["tests/test_example.py"],
+                    "prompt": "WRITE tests/test_example.py",
+                }
+            ],
+        },
+    )
+
+    assert (
+        main(
+            [
+                "plan",
+                "export-ready",
+                "--repo",
+                str(git_repo),
+                "--all",
+                "--runnable-only",
+                "--manifest",
+                "tasks.json",
+            ]
+        )
+        == 0
+    )
+
+    manifest = json.loads((git_repo / ".codex-workerpool" / "tasks.json").read_text(encoding="utf-8"))
+    assert [(task["id"], task["feature_id"]) for task in manifest["tasks"]] == [
+        ("TASK-001", "FEATURE-001"),
+        ("TASK-002", "FEATURE-002"),
+    ]
+
+
+def test_export_ready_feature_runnable_only_respects_completed_feature_dependency(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "foundation",
+            "status": "done",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [],
+        },
+    )
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-002",
+        {
+            "feature_id": "FEATURE-002",
+            "title": "dependent",
+            "status": "ready",
+            "depends_on_features": ["FEATURE-001"],
+            "markdown": "plans/FEATURE-002.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-002",
+                    "title": "dependent task",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                }
+            ],
+        },
+    )
+
+    assert (
+        main(
+            [
+                "plan",
+                "export-ready",
+                "--repo",
+                str(git_repo),
+                "--feature",
+                "FEATURE-002",
+                "--runnable-only",
+                "--manifest",
+                "tasks.json",
+            ]
+        )
+        == 0
+    )
+
+    manifest = json.loads((git_repo / ".codex-workerpool" / "tasks.json").read_text(encoding="utf-8"))
+    assert [(task["id"], task["feature_id"]) for task in manifest["tasks"]] == [("TASK-002", "FEATURE-002")]
+
+
+def test_plan_validate_all_rejects_duplicate_task_ids_and_feature_cycles(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "one",
+            "status": "draft",
+            "depends_on_features": ["FEATURE-002"],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [{"id": "TASK-001", "title": "dup", "status": "draft"}],
+        },
+    )
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-002",
+        {
+            "feature_id": "FEATURE-002",
+            "title": "two",
+            "status": "draft",
+            "depends_on_features": ["FEATURE-001"],
+            "markdown": "plans/FEATURE-002.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [{"id": "TASK-001", "title": "dup", "status": "draft"}],
+        },
+    )
+
+    assert main(["plan", "validate", "--repo", str(git_repo), "--all"]) == 1
+
+
+def test_backlog_status_groups_clarify_and_needs_review(
+    git_repo: Path,
+    workerpool_config: Path,
+    capsys,
+):
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "needs clarity",
+            "status": "draft",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [{"id": "D-001", "status": "open"}],
+            "review_findings": [],
+            "tasks": [],
+        },
+    )
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-002",
+        {
+            "feature_id": "FEATURE-002",
+            "title": "needs review",
+            "status": "exported",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-002.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-002",
+                    "title": "worker done",
+                    "status": "exported",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                }
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    StateStore(config.runs_root).update("TASK-002", status="worker_succeeded")
+
+    assert main(["backlog", "status", "--repo", str(git_repo)]) == 0
+
+    output = capsys.readouterr().out
+    assert "Clarify" in output
+    assert "FEATURE-001 needs clarity" in output
+    assert "open_decisions: D-001" in output
+    assert "Needs Codex Review" in output
+    assert "TASK-002 exported execution=worker_succeeded" in output
+
+
 def _write_plan(repo: Path, data: dict) -> Path:
     path = repo / ".codex-workerpool" / "plans" / "FEATURE-001.plan.json"
     write_json(path, data)
     markdown = repo / ".codex-workerpool" / "plans" / "FEATURE-001.md"
     markdown.write_text("# FEATURE-001\n", encoding="utf-8")
+    return path
+
+
+def _write_feature_plan(repo: Path, feature_id: str, data: dict) -> Path:
+    path = repo / ".codex-workerpool" / "plans" / f"{feature_id}.plan.json"
+    write_json(path, data)
+    markdown = repo / ".codex-workerpool" / "plans" / f"{feature_id}.md"
+    markdown.write_text(f"# {feature_id}\n", encoding="utf-8")
     return path

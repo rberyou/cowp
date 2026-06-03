@@ -38,6 +38,8 @@ class WorkerProfile:
 @dataclass(frozen=True)
 class ProjectConfig:
     repo: Path
+    pool_root: Path
+    legacy_layout: bool
     base_branch: str
     worktree_root: Path
     runs_root: Path
@@ -54,6 +56,7 @@ class ManifestTask:
     worker: str | None
     prompt_file: Path
     allowed_files: tuple[str, ...]
+    feature_id: str | None = None
     acceptance_command: str | None = None
     depends_on: tuple[str, ...] = ()
 
@@ -84,12 +87,12 @@ class ValidationResult:
         self.warnings.extend(other.warnings)
 
 
-def default_config_data(repo: Path) -> dict[str, Any]:
+def default_config_data(repo: Path, external_pool: bool = False) -> dict[str, Any]:
     branch = current_branch(repo) or "main"
     return {
         "base_branch": branch,
-        "worktree_root": "../{repo_name}.worktrees",
-        "runs_root": "../{repo_name}.runs",
+        "worktree_root": "worktrees" if external_pool else "../{repo_name}.worktrees",
+        "runs_root": "runs" if external_pool else "../{repo_name}.runs",
         "max_parallel": 2,
         "opencode": {"pure": True, "default_agent": "build"},
         "acceptance": {
@@ -122,18 +125,32 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def config_path(repo: Path) -> Path:
-    return repo / ".codex-workerpool" / "config.json"
+def pool_root_for(repo: Path, pool_dir: str | Path | None = None) -> tuple[Path, bool]:
+    if pool_dir is None:
+        return (repo / ".codex-workerpool").resolve(), True
+    return Path(pool_dir).expanduser().resolve(), False
 
 
-def load_project_config(repo_path: str | Path) -> ProjectConfig:
+def config_path(repo: Path, pool_dir: str | Path | None = None) -> Path:
+    pool_root, _ = pool_root_for(repo, pool_dir)
+    return pool_root / "config.json"
+
+
+def load_project_config(repo_path: str | Path, pool_dir: str | Path | None = None) -> ProjectConfig:
     repo = Path(repo_path).expanduser().resolve()
-    data = load_json(config_path(repo))
-    return parse_project_config(repo, data)
+    pool_root, legacy_layout = pool_root_for(repo, pool_dir)
+    data = load_json(pool_root / "config.json")
+    return parse_project_config(repo, data, pool_root=pool_root, legacy_layout=legacy_layout)
 
 
-def parse_project_config(repo: Path, data: dict[str, Any]) -> ProjectConfig:
+def parse_project_config(
+    repo: Path,
+    data: dict[str, Any],
+    pool_root: Path | None = None,
+    legacy_layout: bool = True,
+) -> ProjectConfig:
     repo_name = repo.name
+    resolved_pool_root = (pool_root or repo / ".codex-workerpool").resolve()
     workers_data = data.get("workers") or []
     if not isinstance(workers_data, list) or not workers_data:
         raise ConfigError("config.workers must be a non-empty array")
@@ -156,11 +173,17 @@ def parse_project_config(repo: Path, data: dict[str, Any]) -> ProjectConfig:
     opencode_data = data.get("opencode") or {}
     acceptance_data = data.get("acceptance") or {}
 
+    default_worktree_root = "../{repo_name}.worktrees" if legacy_layout else "worktrees"
+    default_runs_root = "../{repo_name}.runs" if legacy_layout else "runs"
+    root_base = repo if legacy_layout else resolved_pool_root
+
     return ProjectConfig(
         repo=repo,
+        pool_root=resolved_pool_root,
+        legacy_layout=legacy_layout,
         base_branch=str(data.get("base_branch") or current_branch(repo) or "main"),
-        worktree_root=_expand_repo_path(repo, repo_name, data.get("worktree_root") or "../{repo_name}.worktrees"),
-        runs_root=_expand_repo_path(repo, repo_name, data.get("runs_root") or "../{repo_name}.runs"),
+        worktree_root=_expand_path(root_base, repo_name, data.get("worktree_root") or default_worktree_root),
+        runs_root=_expand_path(root_base, repo_name, data.get("runs_root") or default_runs_root),
         max_parallel=max(1, int(data.get("max_parallel") or 1)),
         opencode=OpencodeConfig(
             pure=bool(opencode_data.get("pure", True)),
@@ -174,8 +197,15 @@ def parse_project_config(repo: Path, data: dict[str, Any]) -> ProjectConfig:
     )
 
 
-def load_manifest(repo: Path, manifest_path: str | Path) -> Manifest:
-    path = _resolve_user_path(repo, manifest_path)
+def load_manifest(config_or_repo: ProjectConfig | Path, manifest_path: str | Path) -> Manifest:
+    if isinstance(config_or_repo, ProjectConfig):
+        config = config_or_repo
+        path = resolve_control_path(config, manifest_path)
+        prompt_resolver = lambda value: resolve_control_path(config, value)
+    else:
+        repo = Path(config_or_repo).expanduser().resolve()
+        path = _resolve_user_path(repo, manifest_path)
+        prompt_resolver = lambda value: _resolve_user_path(repo, value)
     data = load_json(path)
     tasks_data = data.get("tasks")
     if not isinstance(tasks_data, list):
@@ -195,8 +225,9 @@ def load_manifest(repo: Path, manifest_path: str | Path) -> Manifest:
                 id=task_id,
                 title=title,
                 worker=_optional_str(raw.get("worker")),
-                prompt_file=_resolve_user_path(repo, prompt_raw),
+                prompt_file=prompt_resolver(prompt_raw),
                 allowed_files=allowed_files,
+                feature_id=_optional_str(raw.get("feature_id")),
                 acceptance_command=_optional_str(raw.get("acceptance_command")),
                 depends_on=depends_on,
             )
@@ -277,6 +308,8 @@ def current_branch(repo: Path) -> str | None:
     proc = subprocess.run(
         ["git", "-C", str(repo), "branch", "--show-current"],
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
     )
     if proc.returncode != 0:
@@ -285,11 +318,27 @@ def current_branch(repo: Path) -> str | None:
     return branch or None
 
 
-def _expand_repo_path(repo: Path, repo_name: str, value: str) -> Path:
+def resolve_control_path(config: ProjectConfig, value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    raw = str(value).replace("\\", "/")
+    if config.legacy_layout and raw.startswith(".codex-workerpool/"):
+        return (config.repo / path).resolve()
+    return (config.pool_root / path).resolve()
+
+
+def worker_protocol_path(config: ProjectConfig) -> Path:
+    if config.legacy_layout:
+        return config.repo / "WORKER_PROTOCOL.md"
+    return config.pool_root / "WORKER_PROTOCOL.md"
+
+
+def _expand_path(base: Path, repo_name: str, value: str) -> Path:
     expanded = str(value).replace("{repo_name}", repo_name)
     path = Path(expanded)
     if not path.is_absolute():
-        path = repo / path
+        path = base / path
     return path.resolve()
 
 

@@ -14,6 +14,7 @@ from cowp.config import (
     default_config_data,
     load_manifest,
     load_project_config,
+    pool_root_for,
     validate_project,
     write_json,
 )
@@ -28,12 +29,16 @@ from cowp.gitops import (
     task_worktree,
 )
 from cowp.planning import (
-    export_ready_tasks,
+    backlog_status_lines,
+    export_ready_tasks_many,
     init_plan,
+    load_all_plans,
+    load_feature_plan,
     load_plan,
+    plan_next_all_lines,
     plan_next_lines,
     plan_status_lines,
-    validate_plan,
+    validate_plan_collection,
 )
 from cowp.runner import RunnerError, run_tasks
 from cowp.state import StateStore
@@ -55,12 +60,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     init = sub.add_parser("init", help="initialize workerpool files in a target repo")
     init.add_argument("--repo", required=True)
+    init.add_argument("--pool-dir")
     init.add_argument("--force", action="store_true")
     init.add_argument("--refresh", action="store_true", help="refresh workflow templates without overwriting config")
     init.set_defaults(func=cmd_init)
 
     doctor = sub.add_parser("doctor", help="inspect local workerpool files and template drift")
     doctor.add_argument("--repo", required=True)
+    doctor.add_argument("--pool-dir")
     doctor.set_defaults(func=cmd_doctor)
 
     plan = sub.add_parser("plan", help="manage requirement shaping plans")
@@ -68,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan_init = plan_sub.add_parser("init", help="create a feature planning draft")
     plan_init.add_argument("--repo", required=True)
+    plan_init.add_argument("--pool-dir")
     plan_init.add_argument("--feature", required=True)
     plan_init.add_argument("--title", required=True)
     plan_init.add_argument("--force", action="store_true")
@@ -75,30 +83,41 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan_status = plan_sub.add_parser("status", help="show planning and execution status")
     plan_status.add_argument("--repo", required=True)
+    plan_status.add_argument("--pool-dir")
     plan_status.add_argument("--plan", required=True)
     plan_status.set_defaults(func=cmd_plan_status)
 
     plan_validate = plan_sub.add_parser("validate", help="validate a feature plan")
     plan_validate.add_argument("--repo", required=True)
-    plan_validate.add_argument("--plan", required=True)
+    plan_validate.add_argument("--pool-dir")
+    add_plan_selection(plan_validate)
     plan_validate.set_defaults(func=cmd_plan_validate)
 
     plan_next = plan_sub.add_parser("next", help="show the next runnable planning batch and blockers")
     plan_next.add_argument("--repo", required=True)
-    plan_next.add_argument("--plan", required=True)
+    plan_next.add_argument("--pool-dir")
+    add_plan_selection(plan_next)
     plan_next.add_argument("--max-parallel", type=int)
     plan_next.add_argument("--ignore-dependency-state", action="store_true")
     plan_next.set_defaults(func=cmd_plan_next)
 
     plan_export = plan_sub.add_parser("export-ready", help="export ready planning tasks into the execution manifest")
     plan_export.add_argument("--repo", required=True)
-    plan_export.add_argument("--plan", required=True)
+    plan_export.add_argument("--pool-dir")
+    add_plan_selection(plan_export)
     plan_export.add_argument("--manifest", required=True)
     plan_export.add_argument("--task")
     plan_export.add_argument("--force", action="store_true")
     plan_export.add_argument("--ignore-dependency-state", action="store_true")
     plan_export.add_argument("--runnable-only", action="store_true")
     plan_export.set_defaults(func=cmd_plan_export_ready)
+
+    backlog = sub.add_parser("backlog", help="show multi-feature backlog state")
+    backlog_sub = backlog.add_subparsers(dest="backlog_command", required=True)
+    backlog_status = backlog_sub.add_parser("status", help="show Kanban-style feature and task state")
+    backlog_status.add_argument("--repo", required=True)
+    backlog_status.add_argument("--pool-dir")
+    backlog_status.set_defaults(func=cmd_backlog_status)
 
     validate = sub.add_parser("validate", help="validate config and manifest")
     add_repo_manifest(validate)
@@ -141,23 +160,32 @@ def build_parser() -> argparse.ArgumentParser:
 
 def add_repo_manifest(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo", required=True)
+    parser.add_argument("--pool-dir")
     parser.add_argument("--manifest", required=True)
+
+
+def add_plan_selection(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--plan")
+    group.add_argument("--feature")
+    group.add_argument("--all", action="store_true")
 
 
 def cmd_init(args: argparse.Namespace) -> int:
     repo = Path(args.repo).expanduser().resolve()
     if not (repo / ".git").exists():
         raise ConfigError(f"repo is not a git worktree root: {repo}")
-    workerpool_dir = repo / ".codex-workerpool"
+    workerpool_dir, legacy_layout = pool_root_for(repo, args.pool_dir)
     tasks_dir = workerpool_dir / "tasks"
     plans_dir = workerpool_dir / "plans"
-    config_file = config_path(repo)
+    config_file = config_path(repo, args.pool_dir)
 
     template_force = bool(args.force or args.refresh)
-    write_file(config_file, default_config_data(repo), force=args.force)
-    write_text(repo / "WORKER_PROTOCOL.md", template_text("WORKER_PROTOCOL.md"), force=template_force)
-    write_text(repo / "TASK_TEMPLATE.md", template_text("TASK_TEMPLATE.md"), force=template_force)
-    write_text(repo / "RUNBOOK.md", template_text("RUNBOOK.md"), force=template_force)
+    write_file(config_file, default_config_data(repo, external_pool=not legacy_layout), force=args.force)
+    template_root = repo if legacy_layout else workerpool_dir
+    write_text(template_root / "WORKER_PROTOCOL.md", template_text("WORKER_PROTOCOL.md"), force=template_force)
+    write_text(template_root / "TASK_TEMPLATE.md", template_text("TASK_TEMPLATE.md"), force=template_force)
+    write_text(template_root / "RUNBOOK.md", template_text("RUNBOOK.md"), force=template_force)
     tasks_dir.mkdir(parents=True, exist_ok=True)
     plans_dir.mkdir(parents=True, exist_ok=True)
     write_json_file(workerpool_dir / "tasks.example.json", example_manifest(), force=template_force)
@@ -165,13 +193,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     write_text(plans_dir / "PLANNING_PROTOCOL.md", template_text("PLANNING_PROTOCOL.md"), force=template_force)
     write_text(plans_dir / "FEATURE-001.example.md", template_text("FEATURE_PLAN_TEMPLATE.md"), force=template_force)
     verb = "refreshed" if args.refresh else "initialized"
-    print(f"{verb} workerpool files in {repo}")
+    print(f"{verb} workerpool files in {workerpool_dir}")
     return 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     repo = Path(args.repo).expanduser().resolve()
-    for line in doctor_lines(repo):
+    for line in doctor_lines(repo, args.pool_dir):
         print(line)
     return 0
 
@@ -184,48 +212,62 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 def cmd_plan_init(args: argparse.Namespace) -> int:
-    json_path, markdown_path = init_plan(args.repo, args.feature, args.title, force=args.force)
+    config = load_project_config(args.repo, args.pool_dir)
+    json_path, markdown_path = init_plan(config, args.feature, args.title, force=args.force)
     print(f"created plan JSON: {json_path}")
     print(f"created plan Markdown: {markdown_path}")
     return 0
 
 
 def cmd_plan_status(args: argparse.Namespace) -> int:
-    config = load_project_config(args.repo)
-    plan = load_plan(config.repo, args.plan)
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = load_plan(config, args.plan)
     for line in plan_status_lines(config, plan):
         print(line)
     return 0
 
 
 def cmd_plan_validate(args: argparse.Namespace) -> int:
-    config = load_project_config(args.repo)
-    plan = load_plan(config.repo, args.plan)
-    result = validate_plan(config, plan)
+    config = load_project_config(args.repo, args.pool_dir)
+    plans = validation_scope_plans(config, args)
+    result = validate_plan_collection(config, plans)
     print_validation(result)
     return 0 if result.ok else 1
 
 
 def cmd_plan_next(args: argparse.Namespace) -> int:
-    config = load_project_config(args.repo)
-    plan = load_plan(config.repo, args.plan)
-    for line in plan_next_lines(
-        config,
-        plan,
-        max_parallel=args.max_parallel,
-        ignore_dependency_state=args.ignore_dependency_state,
-    ):
+    config = load_project_config(args.repo, args.pool_dir)
+    plans = selected_plans(config, args)
+    lines = (
+        plan_next_all_lines(
+            config,
+            plans,
+            max_parallel=args.max_parallel,
+            ignore_dependency_state=args.ignore_dependency_state,
+        )
+        if args.all
+        else plan_next_lines(
+            config,
+            plans[0],
+            max_parallel=args.max_parallel,
+            ignore_dependency_state=args.ignore_dependency_state,
+            all_plans=load_all_plans(config),
+        )
+    )
+    for line in lines:
         print(line)
     return 0
 
 
 def cmd_plan_export_ready(args: argparse.Namespace) -> int:
-    config = load_project_config(args.repo)
-    plan = load_plan(config.repo, args.plan)
-    exported = export_ready_tasks(
+    config = load_project_config(args.repo, args.pool_dir)
+    plans = selected_plans(config, args)
+    target_feature = None if args.all else plans[0].feature_id
+    exported = export_ready_tasks_many(
         config=config,
-        plan=plan,
+        plans=load_all_plans(config),
         manifest_path=args.manifest,
+        feature_id=target_feature,
         task_id=args.task,
         force=args.force,
         ignore_dependency_state=args.ignore_dependency_state,
@@ -236,6 +278,13 @@ def cmd_plan_export_ready(args: argparse.Namespace) -> int:
         return 0
     for task_id in exported:
         print(f"{task_id}: exported")
+    return 0
+
+
+def cmd_backlog_status(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    for line in backlog_status_lines(config):
+        print(line)
     return 0
 
 
@@ -375,9 +424,29 @@ def cmd_finish(args: argparse.Namespace) -> int:
 
 
 def load_inputs(args: argparse.Namespace) -> tuple[ProjectConfig, Manifest]:
-    config = load_project_config(args.repo)
-    manifest = load_manifest(config.repo, args.manifest)
+    config = load_project_config(args.repo, getattr(args, "pool_dir", None))
+    manifest = load_manifest(config, args.manifest)
     return config, manifest
+
+
+def selected_plans(config: ProjectConfig, args: argparse.Namespace):
+    if getattr(args, "all", False):
+        return load_all_plans(config)
+    if getattr(args, "feature", None):
+        return (load_feature_plan(config, args.feature),)
+    return (load_plan(config, args.plan),)
+
+
+def validation_scope_plans(config: ProjectConfig, args: argparse.Namespace):
+    plans = load_all_plans(config)
+    if getattr(args, "all", False):
+        return plans
+    selected = selected_plans(config, args)
+    if not plans:
+        return selected
+    known = {plan.feature_id for plan in plans}
+    missing_selected = [plan for plan in selected if plan.feature_id not in known]
+    return (*plans, *missing_selected)
 
 
 def selected_tasks(manifest: Manifest, task_ids: set[str]) -> list:
@@ -422,12 +491,13 @@ def write_text(path: Path, text: str, force: bool = False) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def doctor_lines(repo: Path) -> list[str]:
-    lines = [f"workerpool doctor: {repo}"]
-    config_file = config_path(repo)
+def doctor_lines(repo: Path, pool_dir: str | Path | None = None) -> list[str]:
+    workerpool_dir, legacy_layout = pool_root_for(repo, pool_dir)
+    lines = [f"workerpool doctor: {repo}", f"pool_root: {workerpool_dir}"]
+    config_file = config_path(repo, pool_dir)
     if config_file.exists():
         try:
-            config = load_project_config(repo)
+            config = load_project_config(repo, pool_dir)
         except ConfigError as exc:
             lines.append(f"ERROR config: {exc}")
         else:
@@ -437,12 +507,13 @@ def doctor_lines(repo: Path) -> list[str]:
     else:
         lines.append(f"MISSING config: {config_file}")
 
+    template_root = repo if legacy_layout else workerpool_dir
     checks = [
-        (repo / "WORKER_PROTOCOL.md", "WORKER_PROTOCOL.md"),
-        (repo / "TASK_TEMPLATE.md", "TASK_TEMPLATE.md"),
-        (repo / "RUNBOOK.md", "RUNBOOK.md"),
-        (repo / ".codex-workerpool" / "plans" / "PLANNING_PROTOCOL.md", "PLANNING_PROTOCOL.md"),
-        (repo / ".codex-workerpool" / "plans" / "FEATURE-001.example.md", "FEATURE_PLAN_TEMPLATE.md"),
+        (template_root / "WORKER_PROTOCOL.md", "WORKER_PROTOCOL.md"),
+        (template_root / "TASK_TEMPLATE.md", "TASK_TEMPLATE.md"),
+        (template_root / "RUNBOOK.md", "RUNBOOK.md"),
+        (workerpool_dir / "plans" / "PLANNING_PROTOCOL.md", "PLANNING_PROTOCOL.md"),
+        (workerpool_dir / "plans" / "FEATURE-001.example.md", "FEATURE_PLAN_TEMPLATE.md"),
     ]
     for path, template_name in checks:
         if not path.exists():
@@ -465,9 +536,10 @@ def example_manifest() -> dict:
         "tasks": [
             {
                 "id": "TASK-001",
+                "feature_id": None,
                 "title": "example task",
                 "worker": "default",
-                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "prompt_file": "tasks/TASK-001.md",
                 "allowed_files": ["src/example.py", "tests/test_example.py"],
                 "acceptance_command": None,
                 "depends_on": [],
