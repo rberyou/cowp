@@ -110,7 +110,6 @@ def run_one_task(config: ProjectConfig, task: ManifestTask) -> int:
     args.extend(["--dir", str(worktree)])
     args.extend(["--agent", worker.agent or config.opencode.default_agent])
     args.extend(["--format", "json"])
-    args.extend(["--title", task.title])
     if worker.model:
         args.extend(["--model", worker.model])
     if worker.variant:
@@ -120,6 +119,7 @@ def run_one_task(config: ProjectConfig, task: ManifestTask) -> int:
     effective_prompt_path = run_dir / "effective-prompt.md"
     effective_prompt_path.write_text(prompt, encoding="utf-8")
     args.extend(["--file", str(effective_prompt_path)])
+    args.extend(["--title", task.title])
     args.append(
         f"Read the attached COWP task instructions and implement {task.id} "
         "exactly in the current worktree. Do not search for a separate task spec file."
