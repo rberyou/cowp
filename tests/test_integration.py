@@ -29,6 +29,8 @@ def test_external_pool_init_creates_no_control_files_in_repo(git_repo: Path, fak
     assert (pool / "config.json").is_file()
     assert (pool / "WORKER_PROTOCOL.md").is_file()
     assert (pool / "plans" / "PLANNING_PROTOCOL.md").is_file()
+    assert (pool / "tasks" / "TASK-001.example.md").is_file()
+    assert not (pool / "tasks" / "TASK-001.md").exists()
     assert not (git_repo / ".codex-workerpool").exists()
     assert not (git_repo / "WORKER_PROTOCOL.md").exists()
 

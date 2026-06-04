@@ -199,7 +199,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     tasks_dir.mkdir(parents=True, exist_ok=True)
     plans_dir.mkdir(parents=True, exist_ok=True)
     write_json_file(workerpool_dir / "tasks.example.json", example_manifest(), force=template_force)
-    write_text(tasks_dir / "TASK-001.md", template_text("TASK_PROMPT.md"), force=args.force)
+    write_text(tasks_dir / "TASK-001.example.md", template_text("TASK_PROMPT.md"), force=args.force)
     write_text(plans_dir / "PLANNING_PROTOCOL.md", template_text("PLANNING_PROTOCOL.md"), force=template_force)
     write_text(plans_dir / "FEATURE-001.example.md", template_text("FEATURE_PLAN_TEMPLATE.md"), force=template_force)
     verb = "refreshed" if args.refresh else "initialized"
@@ -561,7 +561,7 @@ def example_manifest() -> dict:
                 "feature_id": None,
                 "title": "example task",
                 "worker": "default",
-                "prompt_file": "tasks/TASK-001.md",
+                "prompt_file": "tasks/TASK-001.example.md",
                 "allowed_files": ["src/example.py", "tests/test_example.py"],
                 "acceptance_command": None,
                 "depends_on": [],
