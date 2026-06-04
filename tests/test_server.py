@@ -138,6 +138,8 @@ def test_dashboard_html_uses_boot_script_without_embedding_user_data():
     assert "setInterval(refresh, refreshMs)" in html
     assert "textContent" in html
     assert "innerHTML" not in html
+    assert "task.depends_on" in html
+    assert "task.blockers" in html
 
 
 def _get(url: str) -> dict[str, str | int]:

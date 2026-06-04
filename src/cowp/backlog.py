@@ -29,6 +29,8 @@ class BacklogTask:
     feature_id: str | None
     column: str | None
     plan_status: str | None
+    depends_on: tuple[str, ...]
+    blockers: tuple[str, ...]
     execution_status: str
     worker: str | None
     branch: str | None
@@ -211,13 +213,16 @@ def _task_snapshot(
     states: dict[str, TaskState],
     state: TaskState | None,
 ) -> BacklogTask:
-    column = backlog_column_for_task(plan, task, all_plans, states, state)
+    blockers = tuple(_task_blockers(plan, task, all_plans, states))
+    column = backlog_column_for_task(plan, task, state, blockers)
     return BacklogTask(
         task_id=task.id,
         title=task.title,
         feature_id=plan.feature_id,
         column=column,
         plan_status=task.status,
+        depends_on=task.depends_on,
+        blockers=blockers,
         execution_status=state.status if state else "planned",
         worker=state.worker if state and state.worker else task.worker or "default",
         branch=state.branch if state else None,
@@ -233,20 +238,16 @@ def _task_snapshot(
 def backlog_column_for_task(
     plan: FeaturePlan,
     task: PlanTask,
-    all_plans: tuple[FeaturePlan, ...],
-    states: dict[str, TaskState],
     state: TaskState | None,
+    blockers: tuple[str, ...],
 ) -> str:
     if state:
         state_column = _column_for_execution_status(state.status)
         if state_column:
             return state_column
 
-    if task.status == "blocked":
+    if blockers:
         return "Blocked"
-    if task.status in {"ready", "exported"}:
-        if _feature_dependency_blockers(plan, all_plans) or _task_dependency_blockers(plan, task, states):
-            return "Blocked"
     if _unresolved_decisions(plan):
         return "Clarify"
     if state and state.status == "worktree_created":
@@ -294,6 +295,8 @@ def _unassigned_manifest_tasks(
                 feature_id=_optional_str(raw.get("feature_id")),
                 column=_column_for_execution_status(state.status) if state else None,
                 plan_status=None,
+                depends_on=tuple(str(dep).strip() for dep in raw.get("depends_on") or [] if str(dep).strip()),
+                blockers=(),
                 execution_status=state.status if state else "planned",
                 worker=state.worker if state and state.worker else _optional_str(raw.get("worker")),
                 branch=state.branch if state else None,
@@ -321,7 +324,12 @@ def _feature_lines(feature: BacklogFeature) -> list[str]:
         lines.append("    open_decisions: " + ", ".join(feature.open_decisions))
     if feature.review_findings:
         lines.append("    review_findings: " + ", ".join(feature.review_findings))
-    lines.extend(_task_line(task) for task in feature.tasks)
+    for task in feature.tasks:
+        lines.append(_task_line(task))
+        if task.depends_on:
+            lines.append("      depends_on: " + ", ".join(task.depends_on))
+        if task.blockers:
+            lines.append("      blocked_by: " + "; ".join(task.blockers))
     return lines
 
 
@@ -356,7 +364,22 @@ def _task_dependency_blockers(
             continue
         dep_state = states.get(dep)
         if not dep_state or dep_state.status != "merged":
-            blockers.append(f"dependency '{dep}' is not merged")
+            blockers.append(f"dependency {dep} is not merged")
+    return blockers
+
+
+def _task_blockers(
+    plan: FeaturePlan,
+    task: PlanTask,
+    all_plans: tuple[FeaturePlan, ...],
+    states: dict[str, TaskState],
+) -> list[str]:
+    blockers: list[str] = []
+    if task.status == "blocked":
+        blockers.append("task plan status is blocked")
+    if task.status in {"ready", "exported", "blocked"}:
+        blockers.extend(_feature_dependency_blockers(plan, all_plans))
+        blockers.extend(_task_dependency_blockers(plan, task, states))
     return blockers
 
 
@@ -409,6 +432,8 @@ def _task_to_dict(task: BacklogTask) -> dict[str, Any]:
         "feature_id": task.feature_id,
         "column": task.column,
         "plan_status": task.plan_status,
+        "depends_on": list(task.depends_on),
+        "blockers": list(task.blockers),
         "execution_status": task.execution_status,
         "worker": task.worker,
         "branch": task.branch,

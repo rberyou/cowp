@@ -386,8 +386,12 @@ def dashboard_html(refresh_ms: int) -> str:
       main.appendChild(el('span', 'badge', task.execution_status));
       root.appendChild(main);
       const grid = el('div', 'task-grid');
+      const dependsOn = (task.depends_on || []).join(', ');
+      const blockers = (task.blockers || []).join('; ');
       const pairs = [
         ['plan', task.plan_status],
+        ['depends_on', dependsOn],
+        ['blocked_by', blockers],
         ['worker', task.worker],
         ['branch', task.branch],
         ['worktree', task.worktree],

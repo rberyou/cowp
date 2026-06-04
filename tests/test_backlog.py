@@ -193,6 +193,8 @@ def test_snapshot_places_tasks_in_their_own_columns_with_feature_grouping(
     assert [task["task_id"] for task in running_feature["tasks"]] == ["TASK-001"]
     assert [task["task_id"] for task in blocked_feature["tasks"]] == ["TASK-002"]
     assert blocked_feature["tasks"][0]["column"] == "Blocked"
+    assert blocked_feature["tasks"][0]["depends_on"] == ["TASK-001"]
+    assert blocked_feature["tasks"][0]["blockers"] == ["dependency TASK-001 is not merged"]
     assert not any(
         task["task_id"] == "TASK-002"
         for feature in _column(data, "Running")["features"]
