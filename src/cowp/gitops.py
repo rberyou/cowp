@@ -61,12 +61,33 @@ def task_worktree(config: ProjectConfig, task_id: str) -> Path:
     return config.worktree_root / task_id
 
 
+def branch_exists(config: ProjectConfig, branch: str) -> bool:
+    proc = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(config.repo),
+            "show-ref",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{branch}",
+        ],
+        text=True,
+    )
+    return proc.returncode == 0
+
+
 def create_worktree(config: ProjectConfig, task: ManifestTask, skip_clean_check: bool = False) -> Path:
     if not skip_clean_check:
         ensure_clean_repo(config)
     worktree = task_worktree(config, task.id)
     if worktree.exists():
         raise GitError(f"task worktree already exists: {worktree}")
+    branch = task_branch(task.id)
+    if branch_exists(config, branch):
+        raise GitError(
+            f"task branch already exists: {branch}; choose a new task id or remove the old branch"
+        )
     worktree.parent.mkdir(parents=True, exist_ok=True)
     run_checked(
         [
@@ -76,7 +97,7 @@ def create_worktree(config: ProjectConfig, task: ManifestTask, skip_clean_check:
             "worktree",
             "add",
             "-b",
-            task_branch(task.id),
+            branch,
             str(worktree),
             config.base_branch,
         ]

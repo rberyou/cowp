@@ -6,6 +6,7 @@ from pathlib import Path
 
 from cowp.cli import main
 from cowp.config import default_config_data, write_json
+from cowp.state import StateStore
 from tests.conftest import run, write_manifest
 
 
@@ -356,6 +357,94 @@ def test_start_clears_previous_failure_state(
     assert task_state["exit_code"] is None
     assert task_state["error"] is None
     assert task_state["review_diff_path"] is None
+
+
+def test_start_all_skips_merged_tasks_in_manifest(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "already merged",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            },
+            {
+                "id": "TASK-002",
+                "title": "new task",
+                "prompt_file": ".codex-workerpool/tasks/TASK-002.md",
+                "allowed_files": ["tests/test_example.py"],
+            },
+        ],
+    )
+    StateStore(git_repo.parent / "repo.runs").update("TASK-001", status="merged")
+
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+
+    assert not (git_repo.parent / "repo.worktrees" / "TASK-001").exists()
+    assert (git_repo.parent / "repo.worktrees" / "TASK-002").exists()
+
+
+def test_run_all_skips_completed_tasks_in_manifest(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "already merged",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            },
+            {
+                "id": "TASK-002",
+                "title": "new task",
+                "prompt_file": ".codex-workerpool/tasks/TASK-002.md",
+                "allowed_files": ["tests/test_example.py"],
+            },
+        ],
+    )
+    store = StateStore(git_repo.parent / "repo.runs")
+    store.update("TASK-001", status="merged")
+
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-002"]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+
+    states = store.load()
+    assert states["TASK-001"].status == "merged"
+    assert states["TASK-002"].status == "worker_succeeded"
+
+
+def test_start_reports_agent_branch_collision_before_git_worktree_add(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+    capsys,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "collision",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    run(["git", "branch", "agent/TASK-001"], git_repo)
+
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 1
+
+    captured = capsys.readouterr()
+    assert "task branch already exists: agent/TASK-001" in captured.err
 
 
 def test_run_all_runs_non_overlapping_tasks_in_parallel(

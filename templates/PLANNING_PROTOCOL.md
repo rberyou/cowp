@@ -102,6 +102,8 @@ A task is ready only when all of these are true:
 - The task does not require the worker to choose architecture.
 - The worker prompt names non-goals and forbidden operations.
 - All open decisions and review findings are resolved.
+- The task id does not collide with an existing `agent/TASK-NNN` branch or the
+  configured task worktree path.
 
 Use the machine-readable plan file as the source of truth:
 
@@ -145,9 +147,15 @@ the execution state unless `--ignore-dependency-state` is passed.
 `--runnable-only` exports only the next dependency-satisfied, non-overlapping
 batch. Later ready tasks remain in the plan until their dependencies merge.
 
-Exported prompts include a `Dependency Contracts` section. If the contract is
-missing or stale, the worker must stop and report the mismatch instead of using
-old draft assumptions.
+Exported prompts include a `Task Contract` section for the current task and a
+`Dependency Contracts` section for task dependencies and feature dependencies.
+If any contract is missing or stale, the worker must stop and report the
+mismatch instead of using old draft assumptions.
+
+Plan validation checks ready tasks for stale task branches and configured
+worktree paths before export. If `agent/TASK-NNN` or the task worktree already
+exists, choose a new task id or explicitly clean up the old worker branch and
+worktree.
 
 After export, review and either commit the workerpool metadata or keep it ignored
 locally before running `cowp start`, because the execution layer expects a clean

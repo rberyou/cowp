@@ -7,6 +7,7 @@ from cowp.cli import main
 from cowp.config import load_project_config, write_json
 from cowp.planning import export_ready_tasks, load_plan, validate_plan
 from cowp.state import StateStore
+from tests.conftest import run
 
 
 def test_plan_init_creates_json_and_markdown(git_repo: Path, workerpool_config: Path):
@@ -387,6 +388,116 @@ def test_export_ready_prompt_includes_dependency_contract(
     prompt = (git_repo / ".codex-workerpool" / "tasks" / "TASK-002.md").read_text(encoding="utf-8")
     assert "## Dependency Contracts" in prompt
     assert "POST /api/v1/reviews/{note_id}/sessions" in prompt
+
+
+def test_export_ready_prompt_includes_task_and_feature_contracts(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "category hierarchy",
+            "status": "done",
+            "depends_on_features": [],
+            "markdown": ".codex-workerpool/plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "backend",
+                    "status": "exported",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                    "contract": "Category tree nodes include total_count.",
+                }
+            ],
+        },
+    )
+    path = _write_feature_plan(
+        git_repo,
+        "FEATURE-002",
+        {
+            "feature_id": "FEATURE-002",
+            "title": "templates",
+            "status": "ready",
+            "depends_on_features": ["FEATURE-001"],
+            "markdown": ".codex-workerpool/plans/FEATURE-002.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-002",
+                    "title": "template",
+                    "status": "ready",
+                    "allowed_files": ["tests/test_example.py"],
+                    "prompt": "WRITE tests/test_example.py",
+                    "contract": "Conversation and import notes share managed frontmatter.",
+                }
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    StateStore(config.runs_root).update("TASK-001", status="merged")
+
+    assert (
+        main(
+            [
+                "plan",
+                "export-ready",
+                "--repo",
+                str(git_repo),
+                "--all",
+                "--manifest",
+                ".codex-workerpool/tasks.json",
+            ]
+        )
+        == 0
+    )
+
+    prompt = (git_repo / ".codex-workerpool" / "tasks" / "TASK-002.md").read_text(encoding="utf-8")
+    assert "## Task Contract" in prompt
+    assert "Conversation and import notes share managed frontmatter." in prompt
+    assert "## Dependency Contracts" in prompt
+    assert "Feature dependencies:" in prompt
+    assert "Category tree nodes include total_count." in prompt
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    assert plan["tasks"][0]["status"] == "exported"
+
+
+def test_plan_validation_rejects_ready_task_when_agent_branch_exists(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    run(["git", "branch", "agent/TASK-003"], git_repo)
+    path = _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "branch collision",
+            "status": "ready",
+            "markdown": ".codex-workerpool/plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-003",
+                    "title": "collision",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                }
+            ],
+        },
+    )
+
+    result = validate_plan(load_project_config(git_repo), load_plan(git_repo, path))
+
+    assert not result.ok
+    assert any("task branch already exists: agent/TASK-003" in error for error in result.errors)
 
 
 def test_export_ready_refuses_unmerged_dependency_unless_ignored(

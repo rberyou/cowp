@@ -9,6 +9,7 @@ from cowp.config import (
     validate_project,
     worker_for_task,
 )
+from cowp.state import StateStore
 from tests.conftest import write_manifest
 
 
@@ -92,3 +93,35 @@ def test_worker_selection_defaults_to_default_worker(git_repo: Path, fake_openco
 
     assert worker_for_task(config, manifest.get_task("TASK-001")).id == "default"
     assert worker_for_task(config, manifest.get_task("TASK-002")).id == "docs"
+
+
+def test_manifest_validation_ignores_overlap_with_merged_tasks(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest_path = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "merged",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            },
+            {
+                "id": "TASK-002",
+                "title": "next",
+                "prompt_file": ".codex-workerpool/tasks/TASK-002.md",
+                "allowed_files": ["src/example.py"],
+            },
+        ],
+    )
+    config = parse_project_config(git_repo, default_config_data(git_repo))
+    StateStore(config.runs_root).update("TASK-001", status="merged")
+    manifest = load_manifest(git_repo, manifest_path)
+
+    result = validate_project(config, manifest)
+
+    assert result.ok
+    assert not any("overlapping allowed_files" in warning for warning in result.warnings)

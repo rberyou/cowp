@@ -83,6 +83,9 @@ cowp finish --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpo
   plans in the pool.
 - Features may depend on other features with `depends_on_features`; those
   dependencies are satisfied only when the upstream feature status is `done`.
+- Plan validation rejects ready tasks when `agent/TASK-NNN` or the configured
+  task worktree path already exists. Choose a fresh task id or explicitly clean
+  up the old branch/worktree before export.
 - `cowp backlog status` prints a Kanban-style overview with derived `Clarify`,
   running, failed, review-needed, blocked, and merged columns.
 - `cowp backlog serve` starts a local read-only dashboard at
@@ -93,9 +96,16 @@ cowp finish --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpo
   `runs_root/state.json`.
 - Multiple OpenCode workers may run concurrently when their `allowed_files` do
   not overlap and their dependencies are satisfied.
+- Manifest overlap warnings ignore tasks already marked `merged` in execution
+  state, so historical entries do not block the next batch.
+- `cowp start` without `--task` skips tasks already started, running,
+  worker-succeeded, or merged. `cowp start --task TASK-NNN` remains explicit.
+- `cowp run --all` skips worker-succeeded and merged tasks.
 - OpenCode defaults to `--pure`.
 - `run` writes `runs_root/TASK-NNN/effective-prompt.md` with the exact prompt
   sent to OpenCode, including the allowed-file boundary and blocked rule.
+- Exported prompts include the task's own contract and dependency contracts from
+  both task dependencies and feature dependencies.
 - `run` treats a zero-exit worker with no file changes as failure, so a
   conversational answer cannot pass as completed implementation.
 - `review` writes `runs_root/TASK-NNN/review.diff` so Codex review material is

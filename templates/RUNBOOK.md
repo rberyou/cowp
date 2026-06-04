@@ -124,6 +124,10 @@ For downstream tasks, record the dependency contract in the plan before marking
 the task ready. Exported prompts include those contracts so workers do not rely
 on stale draft endpoints, schemas, or helper behavior.
 
+Plan validation rejects ready tasks when `agent/TASK-NNN` or the configured task
+worktree path already exists. Reuse of historical task ids is intentionally
+blocked; choose a new task id or explicitly remove the old branch/worktree.
+
 In legacy mode, review and either commit the workerpool metadata or keep
 `.codex-workerpool/` ignored locally before starting worktrees. In external pool
 mode, control files stay outside the project repository. `cowp start` expects a
@@ -136,13 +140,19 @@ cowp validate --repo . --pool-dir ..\Project.workerpool --manifest tasks.json
 ```
 
 Warnings for overlapping `allowed_files` are allowed; those tasks will not run at
-the same time by default.
+the same time by default. Tasks already marked `merged` in execution state are
+ignored for overlap warnings so historical manifest entries do not pollute the
+next batch.
 
 ## 5. Start Worktrees
 
 ```powershell
 cowp start --repo . --pool-dir ..\Project.workerpool --manifest tasks.json
 ```
+
+Without `--task`, `cowp start` skips tasks already marked `worktree_created`,
+`running`, `worker_succeeded`, or `merged`. Use `--task TASK-NNN` only when you
+intend to start that specific task and want any collision to be reported.
 
 Prepare each worktree with the repository-specific environment setup. `cowp`
 does not create virtual environments, install packages, run CMake, or generate
@@ -153,6 +163,10 @@ language-specific build artifacts.
 ```powershell
 cowp run --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --all --max-parallel 2
 ```
+
+With `--all`, `cowp run` skips tasks already marked `worker_succeeded` or
+`merged`. Historical successful tasks can remain in `tasks.json` without being
+rerun.
 
 OpenCode runs in pure mode by default. Logs are written under the configured
 `runs_root`. `cowp run` also writes `runs_root/TASK-NNN/effective-prompt.md`,

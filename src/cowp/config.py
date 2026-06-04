@@ -7,7 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from cowp.state import StateStore
+
 TASK_ID_RE = re.compile(r"^TASK-\d{3,}$")
+MERGED_STATE = "merged"
 
 
 class ConfigError(ValueError):
@@ -265,7 +268,9 @@ def validate_project(config: ProjectConfig, manifest: Manifest) -> ValidationRes
             if dep not in seen and not any(other.id == dep for other in manifest.tasks):
                 result.errors.append(f"{task.id}: unknown dependency '{dep}'")
 
-    for left, right in overlapping_task_pairs(manifest.tasks):
+    merged_task_ids = _merged_task_ids(config)
+    active_tasks = [task for task in manifest.tasks if task.id not in merged_task_ids]
+    for left, right in overlapping_task_pairs(active_tasks):
         result.warnings.append(f"{left.id} and {right.id} have overlapping allowed_files")
 
     return result
@@ -358,3 +363,11 @@ def _optional_str(value: Any) -> str | None:
 
 def _normalize_allowed_path(path: str) -> str:
     return str(path).replace("\\", "/").strip("/").lower()
+
+
+def _merged_task_ids(config: ProjectConfig) -> set[str]:
+    return {
+        task_id
+        for task_id, state in StateStore(config.runs_root).load().items()
+        if state.status == MERGED_STATE
+    }

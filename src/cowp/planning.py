@@ -15,6 +15,7 @@ from cowp.config import (
     resolve_control_path,
     write_json,
 )
+from cowp.gitops import branch_exists, task_branch, task_worktree
 from cowp.state import StateStore
 
 FEATURE_ID_RE = re.compile(r"^FEATURE-\d{3,}$")
@@ -219,6 +220,16 @@ def validate_plan(config: ProjectConfig, plan: FeaturePlan) -> ValidationResult:
                 if not dep_task.contract:
                     result.warnings.append(f"{task.id}: dependency '{dep}' has no explicit contract")
 
+        if task.status == "ready":
+            branch = task_branch(task.id)
+            if branch_exists(config, branch):
+                result.errors.append(
+                    f"{task.id}: task branch already exists: {branch}; choose a new task id or remove the old branch"
+                )
+            worktree = task_worktree(config, task.id)
+            if worktree.exists():
+                result.errors.append(f"{task.id}: task worktree already exists: {worktree}")
+
     ready_tasks = [task for task in plan.tasks if task.status in EXPORTABLE_TASK_STATUSES]
     for left_index, left in enumerate(ready_tasks):
         for right in ready_tasks[left_index + 1 :]:
@@ -368,7 +379,7 @@ def export_ready_tasks_many(
             raise ConfigError(f"{task.id}: manifest task already exists: {manifest_resolved}")
 
         target_prompt.parent.mkdir(parents=True, exist_ok=True)
-        target_prompt.write_text(_render_task_prompt(plan, task), encoding="utf-8")
+        target_prompt.write_text(_render_task_prompt(plan, task, plans), encoding="utf-8")
 
         manifest_item = _manifest_item(plan, task)
         if task.id in existing_ids:
@@ -690,12 +701,17 @@ def _manifest_item(plan: FeaturePlan, task: PlanTask) -> dict[str, Any]:
     }
 
 
-def _render_task_prompt(plan: FeaturePlan, task: PlanTask) -> str:
+def _render_task_prompt(
+    plan: FeaturePlan,
+    task: PlanTask,
+    all_plans: tuple[FeaturePlan, ...] = (),
+) -> str:
     task_body = task.prompt_file.read_text(encoding="utf-8") if task.prompt_file else task.prompt or ""
     depends = ", ".join(task.depends_on) if task.depends_on else "none"
     allowed = "\n".join(f"- `{path}`" for path in task.allowed_files) or "- <none>"
     acceptance = task.acceptance_command or "<repository default or none>"
-    dependency_contracts = _render_dependency_contracts(plan, task)
+    task_contract = task.contract or "- none recorded"
+    dependency_contracts = _render_dependency_contracts(plan, task, all_plans or (plan,))
     return f"""# {task.id} {task.title}
 
 Feature: `{plan.feature_id}` {plan.title}
@@ -722,6 +738,10 @@ Do not commit, merge, rebase, push, or create branches.
 {acceptance}
 ```
 
+## Task Contract
+
+{task_contract}
+
 ## Dependency Contracts
 
 {dependency_contracts}
@@ -738,21 +758,50 @@ Do not commit, merge, rebase, push, or create branches.
 """.rstrip() + "\n"
 
 
-def _render_dependency_contracts(plan: FeaturePlan, task: PlanTask) -> str:
-    if not task.depends_on:
+def _render_dependency_contracts(
+    plan: FeaturePlan,
+    task: PlanTask,
+    all_plans: tuple[FeaturePlan, ...],
+) -> str:
+    lines: list[str] = []
+    if task.depends_on:
+        lines.extend([
+            "Use the merged dependency behavior, not stale draft assumptions. If a dependency contract is missing or conflicts with the code, stop and report the mismatch.",
+            "",
+            "Task dependencies:",
+        ])
+        for dep in task.depends_on:
+            try:
+                dep_task = plan.get_task(dep)
+            except ConfigError:
+                lines.append(f"- `{dep}`: missing from this plan.")
+                continue
+            contract = dep_task.contract or "No explicit contract recorded; verify the merged APIs, schemas, and helper behavior before editing."
+            lines.append(f"- `{dep}` {dep_task.title}: {contract}")
+
+    if plan.depends_on_features:
+        if lines:
+            lines.append("")
+        lines.append("Feature dependencies:")
+        by_feature = {item.feature_id: item for item in all_plans}
+        for dep_feature_id in plan.depends_on_features:
+            dep_plan = by_feature.get(dep_feature_id)
+            if dep_plan is None:
+                lines.append(f"- `{dep_feature_id}`: missing from the selected plan set.")
+                continue
+            lines.append(f"- `{dep_plan.feature_id}` {dep_plan.title} status={dep_plan.status}")
+            contracts = [
+                f"  - `{dep_task.id}` {dep_task.title}: {dep_task.contract}"
+                for dep_task in dep_plan.tasks
+                if dep_task.contract
+            ]
+            if contracts:
+                lines.extend(contracts)
+            else:
+                lines.append("  - No explicit task contracts recorded; verify the merged behavior before editing.")
+
+    if not lines:
         return "- none"
-    lines = [
-        "Use the merged dependency behavior, not stale draft assumptions. If a dependency contract is missing or conflicts with the code, stop and report the mismatch.",
-        "",
-    ]
-    for dep in task.depends_on:
-        try:
-            dep_task = plan.get_task(dep)
-        except ConfigError:
-            lines.append(f"- `{dep}`: missing from this plan.")
-            continue
-        contract = dep_task.contract or "No explicit contract recorded; verify the merged APIs, schemas, and helper behavior before editing."
-        lines.append(f"- `{dep}` {dep_task.title}: {contract}")
     return "\n".join(lines)
 
 

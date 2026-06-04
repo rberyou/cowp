@@ -44,6 +44,9 @@ from cowp.runner import RunnerError, run_tasks
 from cowp.server import ServerError, serve_backlog
 from cowp.state import StateStore
 
+START_SKIP_STATUSES = {"worktree_created", "running", "worker_succeeded", "merged"}
+RUN_SKIP_STATUSES = {"worker_succeeded", "merged"}
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
@@ -316,8 +319,20 @@ def cmd_start(args: argparse.Namespace) -> int:
     if result.errors:
         print_validation(result)
         return 1
-    tasks = selected_tasks(manifest, set(args.task or [task.id for task in manifest.tasks]))
     store = StateStore(config.runs_root)
+    states = store.load()
+    if args.task:
+        task_ids = list(args.task)
+    else:
+        task_ids = [
+            task.id
+            for task in manifest.tasks
+            if not states.get(task.id) or states[task.id].status not in START_SKIP_STATUSES
+        ]
+    if not task_ids:
+        print("no tasks to start")
+        return 0
+    tasks = selected_tasks(manifest, task_ids)
     for task in tasks:
         worktree = create_worktree(config, task, skip_clean_check=args.skip_clean_check)
         store.update(
@@ -350,7 +365,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     if result.errors:
         print_validation(result)
         return 1
-    task_ids = {task.id for task in manifest.tasks} if args.all else set(args.task)
+    if args.all:
+        states = StateStore(config.runs_root).load()
+        task_ids = {
+            task.id
+            for task in manifest.tasks
+            if not states.get(task.id) or states[task.id].status not in RUN_SKIP_STATUSES
+        }
+    else:
+        task_ids = set(args.task)
+    if not task_ids:
+        print("no tasks to run")
+        return 0
     results = run_tasks(config, manifest, task_ids, max_parallel=args.max_parallel)
     for task_id, exit_code in sorted(results.items()):
         print(f"{task_id}: exit_code={exit_code}")
@@ -471,7 +497,7 @@ def validation_scope_plans(config: ProjectConfig, args: argparse.Namespace):
     return (*plans, *missing_selected)
 
 
-def selected_tasks(manifest: Manifest, task_ids: set[str]) -> list:
+def selected_tasks(manifest: Manifest, task_ids) -> list:
     return [manifest.get_task(task_id) for task_id in task_ids]
 
 
