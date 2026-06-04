@@ -148,6 +148,58 @@ def test_snapshot_feature_dependency_blocker_and_unassigned_task(git_repo: Path,
     assert data["unassigned_tasks"][0]["plan_status"] is None
 
 
+def test_snapshot_places_tasks_in_their_own_columns_with_feature_grouping(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "split task states",
+            "status": "exported",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "running dependency",
+                    "status": "exported",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+                {
+                    "id": "TASK-002",
+                    "title": "waiting dependent",
+                    "status": "exported",
+                    "depends_on": ["TASK-001"],
+                    "allowed_files": ["tests/test_example.py"],
+                    "prompt": "WRITE tests/test_example.py",
+                },
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    StateStore(config.runs_root).update("TASK-001", status="running")
+
+    data = backlog_snapshot_to_dict(build_backlog_snapshot(config))
+
+    running_feature = _feature(_column(data, "Running"), "FEATURE-001")
+    blocked_feature = _feature(_column(data, "Blocked"), "FEATURE-001")
+
+    assert [task["task_id"] for task in running_feature["tasks"]] == ["TASK-001"]
+    assert [task["task_id"] for task in blocked_feature["tasks"]] == ["TASK-002"]
+    assert blocked_feature["tasks"][0]["column"] == "Blocked"
+    assert not any(
+        task["task_id"] == "TASK-002"
+        for feature in _column(data, "Running")["features"]
+        for task in feature["tasks"]
+    )
+
+
 def test_backlog_status_lines_render_from_snapshot(git_repo: Path, workerpool_config: Path):
     _write_feature_plan(
         git_repo,
@@ -173,6 +225,10 @@ def test_backlog_status_lines_render_from_snapshot(git_repo: Path, workerpool_co
 
 def _column(data: dict, title: str) -> dict:
     return next(column for column in data["columns"] if column["title"] == title)
+
+
+def _feature(column: dict, feature_id: str) -> dict:
+    return next(feature for feature in column["features"] if feature["feature_id"] == feature_id)
 
 
 def _write_feature_plan(repo: Path, feature_id: str, data: dict) -> Path:

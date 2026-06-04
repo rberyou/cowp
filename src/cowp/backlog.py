@@ -27,6 +27,7 @@ class BacklogTask:
     task_id: str
     title: str
     feature_id: str | None
+    column: str | None
     plan_status: str | None
     execution_status: str
     worker: str | None
@@ -78,10 +79,16 @@ def build_backlog_snapshot(config: ProjectConfig) -> BacklogSnapshot:
     seen_task_ids: set[str] = set()
 
     for plan in plans:
-        column = backlog_column_for_plan(plan, plans, states)
-        feature = _feature_snapshot(plan, column, plans, states)
-        seen_task_ids.update(task.task_id for task in feature.tasks)
-        features_by_column[column].append(feature)
+        tasks = tuple(_task_snapshot(plan, task, plans, states, states.get(task.id)) for task in plan.tasks)
+        seen_task_ids.update(task.task_id for task in tasks)
+        if tasks:
+            for column in KANBAN_COLUMNS:
+                column_tasks = tuple(task for task in tasks if task.column == column)
+                if column_tasks:
+                    features_by_column[column].append(_feature_snapshot(plan, column, plans, column_tasks))
+        else:
+            column = backlog_column_for_plan(plan, plans, states)
+            features_by_column[column].append(_feature_snapshot(plan, column, plans, ()))
 
     manifest_errors: list[str] = []
     unassigned_tasks = _unassigned_manifest_tasks(config, seen_task_ids, states, manifest_errors)
@@ -182,7 +189,7 @@ def _feature_snapshot(
     plan: FeaturePlan,
     column: str,
     all_plans: tuple[FeaturePlan, ...],
-    states: dict[str, TaskState],
+    tasks: tuple[BacklogTask, ...],
 ) -> BacklogFeature:
     return BacklogFeature(
         feature_id=plan.feature_id,
@@ -193,15 +200,23 @@ def _feature_snapshot(
         blockers=tuple(_feature_dependency_blockers(plan, all_plans)),
         open_decisions=tuple(_unresolved_decisions(plan)),
         review_findings=tuple(_unresolved_findings(plan)),
-        tasks=tuple(_task_snapshot(plan.feature_id, task, states.get(task.id)) for task in plan.tasks),
+        tasks=tasks,
     )
 
 
-def _task_snapshot(feature_id: str | None, task: PlanTask, state: TaskState | None) -> BacklogTask:
+def _task_snapshot(
+    plan: FeaturePlan,
+    task: PlanTask,
+    all_plans: tuple[FeaturePlan, ...],
+    states: dict[str, TaskState],
+    state: TaskState | None,
+) -> BacklogTask:
+    column = backlog_column_for_task(plan, task, all_plans, states, state)
     return BacklogTask(
         task_id=task.id,
         title=task.title,
-        feature_id=feature_id,
+        feature_id=plan.feature_id,
+        column=column,
         plan_status=task.status,
         execution_status=state.status if state else "planned",
         worker=state.worker if state and state.worker else task.worker or "default",
@@ -213,6 +228,36 @@ def _task_snapshot(feature_id: str | None, task: PlanTask, state: TaskState | No
         review_diff_path=state.review_diff_path if state else None,
         final_diff_path=state.final_diff_path if state else None,
     )
+
+
+def backlog_column_for_task(
+    plan: FeaturePlan,
+    task: PlanTask,
+    all_plans: tuple[FeaturePlan, ...],
+    states: dict[str, TaskState],
+    state: TaskState | None,
+) -> str:
+    if state:
+        state_column = _column_for_execution_status(state.status)
+        if state_column:
+            return state_column
+
+    if task.status == "blocked":
+        return "Blocked"
+    if task.status in {"ready", "exported"}:
+        if _feature_dependency_blockers(plan, all_plans) or _task_dependency_blockers(plan, task, states):
+            return "Blocked"
+    if _unresolved_decisions(plan):
+        return "Clarify"
+    if state and state.status == "worktree_created":
+        return "Exported"
+    if task.status == "exported":
+        return "Exported"
+    if task.status == "ready":
+        return "Plan Ready"
+    if task.status == "review" or _unresolved_findings(plan):
+        return "Plan Review"
+    return "Draft"
 
 
 def _unassigned_manifest_tasks(
@@ -247,6 +292,7 @@ def _unassigned_manifest_tasks(
                 task_id=task_id,
                 title=str(raw.get("title") or task_id),
                 feature_id=_optional_str(raw.get("feature_id")),
+                column=_column_for_execution_status(state.status) if state else None,
                 plan_status=None,
                 execution_status=state.status if state else "planned",
                 worker=state.worker if state and state.worker else _optional_str(raw.get("worker")),
@@ -283,6 +329,35 @@ def _task_line(task: BacklogTask, indent: str = "    ") -> str:
     exit_code = "" if task.exit_code is None else f" exit={task.exit_code}"
     plan_status = task.plan_status or "unassigned"
     return f"{indent}{task.task_id} {plan_status} execution={task.execution_status}{exit_code}"
+
+
+def _column_for_execution_status(status: str) -> str | None:
+    if status == "worker_failed":
+        return "Failed"
+    if status == "running":
+        return "Running"
+    if status == "worker_succeeded":
+        return "Needs Codex Review"
+    if status == "merged":
+        return "Merged"
+    return None
+
+
+def _task_dependency_blockers(
+    plan: FeaturePlan,
+    task: PlanTask,
+    states: dict[str, TaskState],
+) -> list[str]:
+    task_ids = {item.id for item in plan.tasks}
+    blockers: list[str] = []
+    for dep in task.depends_on:
+        if dep not in task_ids:
+            blockers.append(f"unknown dependency '{dep}'")
+            continue
+        dep_state = states.get(dep)
+        if not dep_state or dep_state.status != "merged":
+            blockers.append(f"dependency '{dep}' is not merged")
+    return blockers
 
 
 def _feature_dependency_blockers(plan: FeaturePlan, all_plans: tuple[FeaturePlan, ...]) -> list[str]:
@@ -332,6 +407,7 @@ def _task_to_dict(task: BacklogTask) -> dict[str, Any]:
         "task_id": task.task_id,
         "title": task.title,
         "feature_id": task.feature_id,
+        "column": task.column,
         "plan_status": task.plan_status,
         "execution_status": task.execution_status,
         "worker": task.worker,

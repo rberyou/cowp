@@ -70,7 +70,9 @@ cowp backlog serve --repo . --pool-dir ..\Project.workerpool
 
 `backlog serve` starts a local, read-only dashboard that polls the same backlog
 snapshot as `backlog status`. It binds to `127.0.0.1:8765` by default and accepts
-only loopback hosts in v2.2.
+only loopback hosts in v2.2. Backlog columns group tasks by feature, but each
+task is placed by its own derived task state. A feature can appear in multiple
+columns when its tasks are in different states.
 
 ## 3. Export Ready Tasks
 

@@ -92,6 +92,9 @@ cowp finish --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpo
   `http://127.0.0.1:8765` by default. It uses stdlib `http.server`, serves only
   loopback hosts, and polls the same structured backlog snapshot as the text
   view.
+- Backlog columns group tasks by feature, but each task is placed by its own
+  derived task state. A feature may appear in multiple columns when its tasks
+  are in different states.
 - `exported` is only a planning status; execution status still lives in
   `runs_root/state.json`.
 - Multiple OpenCode workers may run concurrently when their `allowed_files` do
