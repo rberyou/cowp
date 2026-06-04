@@ -22,18 +22,6 @@ FEATURE_STATUSES = {"draft", "review", "reviewed", "blocked", "ready", "exported
 TASK_STATUSES = {"draft", "review", "blocked", "ready", "exported"}
 GATED_FEATURE_STATUSES = {"reviewed", "ready", "exported", "done"}
 EXPORTABLE_TASK_STATUSES = {"ready", "exported"}
-KANBAN_COLUMNS = [
-    "Draft",
-    "Clarify",
-    "Plan Review",
-    "Plan Ready",
-    "Exported",
-    "Running",
-    "Needs Codex Review",
-    "Blocked",
-    "Failed",
-    "Merged",
-]
 
 
 @dataclass(frozen=True)
@@ -423,75 +411,9 @@ def plan_status_lines(config: ProjectConfig, plan: FeaturePlan) -> list[str]:
 
 
 def backlog_status_lines(config: ProjectConfig) -> list[str]:
-    plans = load_all_plans(config)
-    states = StateStore(config.runs_root).load()
-    result = validate_plan_collection(config, plans)
-    grouped: dict[str, list[str]] = {column: [] for column in KANBAN_COLUMNS}
-    seen_task_ids: set[str] = set()
+    from cowp.backlog import backlog_status_lines as render_backlog_status_lines
 
-    for plan in plans:
-        column = _backlog_column(plan, plans, states)
-        lines = [f"  {plan.feature_id} {plan.title}"]
-        if plan.status == "done" or _all_tasks_merged(plan, states):
-            merged_count = sum(1 for task in plan.tasks if states.get(task.id) and states[task.id].status == "merged")
-            lines[0] += f" ({merged_count}/{len(plan.tasks)} tasks merged)"
-        else:
-            lines[0] += f" [{plan.status}]"
-
-        blockers = _feature_dependency_blockers(plan, plans)
-        if blockers:
-            lines.append("    blocked by: " + "; ".join(blockers))
-
-        unresolved_decisions = [item.id for item in plan.open_decisions if item.status != "resolved"]
-        unresolved_findings = [item.id for item in plan.review_findings if item.status != "resolved"]
-        if unresolved_decisions:
-            lines.append("    open_decisions: " + ", ".join(unresolved_decisions))
-        if unresolved_findings:
-            lines.append("    review_findings: " + ", ".join(unresolved_findings))
-
-        for task in plan.tasks:
-            seen_task_ids.add(task.id)
-            state = states.get(task.id)
-            execution = state.status if state else "planned"
-            exit_code = "" if not state or state.exit_code is None else f" exit={state.exit_code}"
-            lines.append(f"    {task.id} {task.status} execution={execution}{exit_code}")
-        grouped[column].extend(lines)
-
-    manifest_path = config.pool_root / "tasks.json"
-    if manifest_path.exists():
-        try:
-            data = load_json(manifest_path)
-        except ConfigError:
-            data = {"tasks": []}
-        for raw in data.get("tasks") or []:
-            if not isinstance(raw, dict):
-                continue
-            task_id = str(raw.get("id") or "").strip()
-            if not task_id or task_id in seen_task_ids:
-                continue
-            state = states.get(task_id)
-            execution = state.status if state else "planned"
-            grouped["Draft"].append(f"  Unassigned")
-            grouped["Draft"].append(f"    {task_id} execution={execution}")
-
-    lines = ["Backlog"]
-    if result.errors:
-        lines.append("")
-        lines.append("Validation Errors")
-        lines.extend(f"  - {error}" for error in result.errors)
-    if result.warnings:
-        lines.append("")
-        lines.append("Validation Warnings")
-        lines.extend(f"  - {warning}" for warning in result.warnings)
-
-    for column in KANBAN_COLUMNS:
-        items = grouped[column]
-        if not items:
-            continue
-        lines.append("")
-        lines.append(column)
-        lines.extend(items)
-    return lines
+    return render_backlog_status_lines(config)
 
 
 def plan_next_lines(
@@ -927,38 +849,6 @@ def _feature_dependency_cycles(plans: tuple[FeaturePlan, ...]) -> list[list[str]
     for feature_id in sorted(graph):
         visit(feature_id)
     return cycles
-
-
-def _backlog_column(
-    plan: FeaturePlan,
-    all_plans: tuple[FeaturePlan, ...],
-    states: dict[str, object],
-) -> str:
-    if any(item.status != "resolved" for item in plan.open_decisions):
-        return "Clarify"
-    task_states = [states.get(task.id) for task in plan.tasks]
-    state_names = {getattr(state, "status", None) for state in task_states if state}
-    if "worker_failed" in state_names:
-        return "Failed"
-    if "running" in state_names:
-        return "Running"
-    if "worker_succeeded" in state_names:
-        return "Needs Codex Review"
-    if plan.status == "blocked" or _feature_dependency_blockers(plan, all_plans):
-        return "Blocked"
-    if plan.status == "done" or _all_tasks_merged(plan, states):
-        return "Merged"
-    if plan.status == "exported" or any(task.status == "exported" for task in plan.tasks):
-        return "Exported"
-    if plan.status in {"ready", "reviewed"} or any(task.status == "ready" for task in plan.tasks):
-        return "Plan Ready"
-    if plan.status == "review" or any(item.status != "resolved" for item in plan.review_findings):
-        return "Plan Review"
-    return "Draft"
-
-
-def _all_tasks_merged(plan: FeaturePlan, states: dict[str, object]) -> bool:
-    return bool(plan.tasks) and all(states.get(task.id) and states[task.id].status == "merged" for task in plan.tasks)
 
 
 def _write_plan_with_status(plan: FeaturePlan, status_by_task: dict[str, str]) -> None:

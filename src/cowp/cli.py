@@ -6,6 +6,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from cowp.backlog import backlog_status_lines
 from cowp.config import (
     ConfigError,
     Manifest,
@@ -29,7 +30,6 @@ from cowp.gitops import (
     task_worktree,
 )
 from cowp.planning import (
-    backlog_status_lines,
     export_ready_tasks_many,
     init_plan,
     load_all_plans,
@@ -41,6 +41,7 @@ from cowp.planning import (
     validate_plan_collection,
 )
 from cowp.runner import RunnerError, run_tasks
+from cowp.server import ServerError, serve_backlog
 from cowp.state import StateStore
 
 
@@ -49,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except (ConfigError, GitError, RunnerError) as exc:
+    except (ConfigError, GitError, RunnerError, ServerError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
@@ -118,6 +119,15 @@ def build_parser() -> argparse.ArgumentParser:
     backlog_status.add_argument("--repo", required=True)
     backlog_status.add_argument("--pool-dir")
     backlog_status.set_defaults(func=cmd_backlog_status)
+
+    backlog_serve = backlog_sub.add_parser("serve", help="serve a local read-only backlog dashboard")
+    backlog_serve.add_argument("--repo", required=True)
+    backlog_serve.add_argument("--pool-dir")
+    backlog_serve.add_argument("--host", default="127.0.0.1")
+    backlog_serve.add_argument("--port", type=int, default=8765)
+    backlog_serve.add_argument("--refresh-ms", type=int, default=3000)
+    backlog_serve.add_argument("--no-open", action="store_true")
+    backlog_serve.set_defaults(func=cmd_backlog_serve)
 
     validate = sub.add_parser("validate", help="validate config and manifest")
     add_repo_manifest(validate)
@@ -285,6 +295,18 @@ def cmd_backlog_status(args: argparse.Namespace) -> int:
     config = load_project_config(args.repo, args.pool_dir)
     for line in backlog_status_lines(config):
         print(line)
+    return 0
+
+
+def cmd_backlog_serve(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    serve_backlog(
+        config,
+        host=args.host,
+        port=args.port,
+        refresh_ms=args.refresh_ms,
+        open_browser=not args.no_open,
+    )
     return 0
 
 

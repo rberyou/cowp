@@ -114,6 +114,7 @@ For an external control directory, use pool-relative paths:
 ```powershell
 cowp plan validate --repo . --pool-dir ..\Project.workerpool --plan plans/FEATURE-001.plan.json
 cowp backlog status --repo . --pool-dir ..\Project.workerpool
+cowp backlog serve --repo . --pool-dir ..\Project.workerpool
 ```
 
 ## Export Rule

@@ -43,6 +43,7 @@ Shape a feature before workers can execute it:
 cowp plan init --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --feature FEATURE-001 --title "short feature title"
 cowp plan validate --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --plan plans\FEATURE-001.plan.json
 cowp backlog status --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool
+cowp backlog serve --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool
 cowp plan next --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --all
 cowp plan export-ready `
   --repo G:\workspace\Project `
@@ -84,6 +85,10 @@ cowp finish --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpo
   dependencies are satisfied only when the upstream feature status is `done`.
 - `cowp backlog status` prints a Kanban-style overview with derived `Clarify`,
   running, failed, review-needed, blocked, and merged columns.
+- `cowp backlog serve` starts a local read-only dashboard at
+  `http://127.0.0.1:8765` by default. It uses stdlib `http.server`, serves only
+  loopback hosts, and polls the same structured backlog snapshot as the text
+  view.
 - `exported` is only a planning status; execution status still lives in
   `runs_root/state.json`.
 - Multiple OpenCode workers may run concurrently when their `allowed_files` do
@@ -126,3 +131,23 @@ cowp run --repo G:\workspace\Project --manifest tasks.json --all
 
 Legacy manifests that still reference `.codex-workerpool/tasks/TASK-NNN.md`
 remain valid.
+
+## Backlog Dashboard
+
+Start the dashboard while running workers in another terminal:
+
+```powershell
+cowp backlog serve `
+  --repo G:\workspace\Project `
+  --pool-dir G:\workspace\Project.workerpool `
+  --host 127.0.0.1 `
+  --port 8765 `
+  --refresh-ms 3000
+```
+
+Use `--no-open` to disable browser auto-open. v2.2 accepts only loopback hosts:
+`127.0.0.1`, `localhost`, and `::1`. The dashboard is read-only and exposes only:
+
+- `/`
+- `/api/backlog.json`
+- `/api/health`

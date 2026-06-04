@@ -65,7 +65,12 @@ Use the backlog view when multiple features are being shaped or executed:
 
 ```powershell
 cowp backlog status --repo . --pool-dir ..\Project.workerpool
+cowp backlog serve --repo . --pool-dir ..\Project.workerpool
 ```
+
+`backlog serve` starts a local, read-only dashboard that polls the same backlog
+snapshot as `backlog status`. It binds to `127.0.0.1:8765` by default and accepts
+only loopback hosts in v2.2.
 
 ## 3. Export Ready Tasks
 
