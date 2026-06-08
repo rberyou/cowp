@@ -120,12 +120,22 @@ For dependency chains, export only the next runnable batch. By default,
 `export-ready` refuses to export tasks whose dependencies are not `merged` in the
 execution state.
 
+Task dependencies are satisfied only after the upstream task is `merged`.
+`worker_succeeded` means the upstream task needs Codex review; downstream tasks
+remain blocked and must not start or run yet.
+
 For feature-level dependencies, add `depends_on_features` to the plan JSON. A
-feature dependency is satisfied only when the upstream feature status is `done`.
+feature dependency uses query-layer feature completion, normally explicit
+`status: done` or all upstream tasks merged.
 
 For downstream tasks, record the dependency contract in the plan before marking
 the task ready. Exported prompts include those contracts so workers do not rely
 on stale draft endpoints, schemas, or helper behavior.
+
+Exported manifest entries store dependency metadata. If Codex changes a task's
+dependency mapping after export, `cowp validate`, `cowp start`, and `cowp run`
+surface a stale prompt blocker. Re-export the task with
+`cowp plan export-ready --force` before starting or running it.
 
 Plan validation rejects ready tasks when `agent/TASK-NNN` or the configured task
 worktree path already exists. Reuse of historical task ids is intentionally
@@ -154,8 +164,9 @@ cowp start --repo . --pool-dir ..\Project.workerpool --manifest tasks.json
 ```
 
 Without `--task`, `cowp start` skips tasks already marked `worktree_created`,
-`running`, `worker_succeeded`, or `merged`. Use `--task TASK-NNN` only when you
-intend to start that specific task and want any collision to be reported.
+`running`, `worker_succeeded`, or `merged`, plus tasks blocked by dependencies or
+stale dependency metadata. Use `--task TASK-NNN` only when you intend to start
+that specific task and want any blocker or collision to be reported.
 
 Prepare each worktree with the repository-specific environment setup. `cowp`
 does not create virtual environments, install packages, run CMake, or generate
@@ -168,8 +179,9 @@ cowp run --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --all -
 ```
 
 With `--all`, `cowp run` skips tasks already marked `worker_succeeded` or
-`merged`. Historical successful tasks can remain in `tasks.json` without being
-rerun.
+`merged`. It also waits for dependency blockers to clear; a downstream task does
+not run while its upstream dependency is only `worker_succeeded`. Historical
+successful tasks can remain in `tasks.json` without being rerun.
 
 OpenCode runs in pure mode by default. Logs are written under the configured
 `runs_root`. `cowp run` also writes `runs_root/TASK-NNN/effective-prompt.md`,

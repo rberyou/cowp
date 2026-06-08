@@ -84,7 +84,8 @@ cowp finish --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpo
 - `cowp plan next --all` computes the next runnable batch across all feature
   plans in the pool.
 - Features may depend on other features with `depends_on_features`; those
-  dependencies are satisfied only when the upstream feature status is `done`.
+  dependencies use query-layer feature completion, normally explicit
+  `status: done` or all upstream tasks merged.
 - Plan validation rejects ready tasks when `agent/TASK-NNN` or the configured
   task worktree path already exists. Choose a fresh task id or explicitly clean
   up the old branch/worktree before export.
@@ -101,6 +102,13 @@ cowp finish --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpo
   `runs_root/state.json`.
 - Multiple OpenCode workers may run concurrently when their `allowed_files` do
   not overlap and their dependencies are satisfied.
+- Task dependencies are satisfied only by execution state `merged`.
+  `worker_succeeded` means the task is waiting for Codex review and does not
+  unlock downstream tasks.
+- `cowp plan export-ready` writes dependency metadata into the manifest. If the
+  plan dependency mapping changes after export, `cowp validate`, `cowp start`,
+  and `cowp run` block the stale task until it is re-exported with
+  `export-ready --force`.
 - Manifest overlap warnings ignore tasks already marked `merged` in execution
   state, so historical entries do not block the next batch.
 - `cowp start` without `--task` skips tasks already started, running,

@@ -16,9 +16,9 @@ from cowp.config import (
     worker_protocol_path,
 )
 from cowp.gitops import task_worktree
+from cowp.queries import WorkflowQueries
 from cowp.state import StateStore
 
-DONE_STATUSES = {"worker_succeeded", "merged"}
 NO_CHANGES_EXIT_CODE = 3
 
 
@@ -35,6 +35,7 @@ def run_tasks(
     max_workers = max_parallel or config.max_parallel
     states = StateStore(config.runs_root)
     task_map = {task.id: task for task in manifest.tasks if task.id in selected_task_ids}
+    known_task_ids = {task.id for task in manifest.tasks}
     pending = list(task_map.values())
     active: dict[concurrent.futures.Future[int], ManifestTask] = {}
     active_by_worker: dict[str, int] = {}
@@ -44,11 +45,12 @@ def run_tasks(
         while pending or active:
             launched = False
             state_snapshot = states.load()
+            queries = WorkflowQueries(config, manifest=manifest, states=state_snapshot)
 
             for task in list(pending):
                 if len(active) >= max_workers:
                     break
-                if not _dependencies_satisfied(task, state_snapshot):
+                if queries.run_blockers(task, known_task_ids=known_task_ids):
                     continue
                 if _overlaps_active(task, active.values()):
                     continue
@@ -63,7 +65,12 @@ def run_tasks(
                 launched = True
 
             if not active:
-                blocked = ", ".join(task.id for task in pending)
+                if results:
+                    break
+                blocked = ", ".join(
+                    _blocked_task_summary(queries, task, known_task_ids)
+                    for task in pending
+                )
                 raise RunnerError(f"no runnable tasks; blocked tasks: {blocked}")
 
             if not launched and pending:
@@ -172,14 +179,6 @@ def run_one_task(config: ProjectConfig, task: ManifestTask) -> int:
     return exit_code
 
 
-def _dependencies_satisfied(task: ManifestTask, states: dict[str, object]) -> bool:
-    for dep in task.depends_on:
-        dep_state = states.get(dep)
-        if not dep_state or getattr(dep_state, "status", None) not in DONE_STATUSES:
-            return False
-    return True
-
-
 def effective_prompt(config: ProjectConfig, task: ManifestTask, raw_prompt: str) -> str:
     protocol_path = worker_protocol_path(config)
     if protocol_path.is_file():
@@ -239,6 +238,13 @@ Do not commit, merge, rebase, push, or create branches.
 
 def _overlaps_active(task: ManifestTask, active_tasks: object) -> bool:
     return any(paths_overlap(task.allowed_files, active.allowed_files) for active in active_tasks)
+
+
+def _blocked_task_summary(queries: WorkflowQueries, task: ManifestTask, known_task_ids: set[str]) -> str:
+    blockers = queries.run_blockers(task, known_task_ids=known_task_ids)
+    if not blockers:
+        return task.id
+    return f"{task.id} ({'; '.join(blockers)})"
 
 
 def _changed_files_outside_allowed(worktree: Path, task: ManifestTask) -> list[str]:

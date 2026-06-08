@@ -16,6 +16,7 @@ from cowp.config import (
     write_json,
 )
 from cowp.gitops import branch_exists, task_branch, task_worktree
+from cowp.queries import WorkflowQueries, dependency_metadata_dict
 from cowp.state import StateStore
 
 FEATURE_ID_RE = re.compile(r"^FEATURE-\d{3,}$")
@@ -248,6 +249,7 @@ def validate_plan_collection(config: ProjectConfig, plans: tuple[FeaturePlan, ..
     result = ValidationResult()
     known_features = {plan.feature_id for plan in plans}
     task_to_feature: dict[str, str] = {}
+    queries = WorkflowQueries(config, plans=plans)
 
     for plan in plans:
         result.extend(validate_plan(config, plan))
@@ -261,8 +263,7 @@ def validate_plan_collection(config: ProjectConfig, plans: tuple[FeaturePlan, ..
             else:
                 task_to_feature[task.id] = plan.feature_id
         if plan.status == "done":
-            states = StateStore(config.runs_root).load()
-            unmerged = [task.id for task in plan.tasks if not states.get(task.id) or states[task.id].status != "merged"]
+            unmerged = [task.id for task in plan.tasks if not queries.is_task_completion_satisfied(task.id)]
             if unmerged:
                 result.errors.append(
                     f"{plan.feature_id}: done requires all tasks merged: {', '.join(unmerged)}"
@@ -308,6 +309,7 @@ def export_ready_tasks_many(
     if result.errors:
         raise ConfigError("; ".join(result.errors))
 
+    queries = WorkflowQueries(config, plans=plans)
     selected_plans = [plan for plan in plans if not feature_id or plan.feature_id == feature_id]
     if feature_id and not selected_plans:
         raise ConfigError(f"feature not found: {feature_id}")
@@ -315,9 +317,9 @@ def export_ready_tasks_many(
     selected: list[tuple[FeaturePlan, PlanTask]] = [
         (plan, task)
         for plan in selected_plans
-        if not _feature_dependency_blockers(plan, plans)
+        if not queries.feature_dependency_blockers(plan, plans)
         for task in plan.tasks
-        if task.status == "ready"
+        if _export_ready_status_allowed(task.status, force)
     ]
     if task_id:
         selected = [(plan, task) for plan, task in selected if task.id == task_id]
@@ -330,7 +332,8 @@ def export_ready_tasks_many(
                     continue
             else:
                 raise ConfigError(f"Task not found in selected plans: {task_id}")
-            raise ConfigError(f"{task_id}: task is not ready")
+            expected = "ready or exported" if force else "ready"
+            raise ConfigError(f"{task_id}: task is not {expected}")
 
     if runnable_only:
         runnable_ids = {
@@ -353,13 +356,17 @@ def export_ready_tasks_many(
     if not selected:
         return []
 
-    states = StateStore(config.runs_root).load()
     if not ignore_dependency_state:
+        known_task_ids = {task.id for plan in plans for task in plan.tasks}
         for _, task in selected:
-            for dep in task.depends_on:
-                dep_state = states.get(dep)
-                if not dep_state or dep_state.status != "merged":
-                    raise ConfigError(f"{task.id}: dependency '{dep}' is not merged in execution state")
+            blockers = queries.dependency_blockers(
+                task,
+                known_task_ids=known_task_ids,
+                quote=True,
+                include_prompt_staleness=False,
+            )
+            if blockers:
+                raise ConfigError(f"{task.id}: {'; '.join(blockers)} in execution state")
 
     manifest_resolved = resolve_control_path(config, manifest_path)
     manifest_data = _load_or_empty_manifest(manifest_resolved)
@@ -496,8 +503,9 @@ def plan_next_all_lines(
         lines.append("  validation_warnings:")
         lines.extend(f"  - {warning}" for warning in result.warnings)
 
+    queries = WorkflowQueries(config, plans=plans)
     for plan in plans:
-        feature_blockers = _feature_dependency_blockers(plan, plans)
+        feature_blockers = queries.feature_dependency_blockers(plan, plans)
         lines.append(f"{plan.feature_id} {plan.status}")
         if feature_blockers:
             lines.append("  feature_blockers: " + "; ".join(feature_blockers))
@@ -689,7 +697,7 @@ def _load_or_empty_manifest(path: Path) -> dict[str, Any]:
 
 
 def _manifest_item(plan: FeaturePlan, task: PlanTask) -> dict[str, Any]:
-    return {
+    item = {
         "id": task.id,
         "feature_id": plan.feature_id,
         "title": task.title,
@@ -697,8 +705,9 @@ def _manifest_item(plan: FeaturePlan, task: PlanTask) -> dict[str, Any]:
         "prompt_file": f"tasks/{task.id}.md",
         "allowed_files": list(task.allowed_files),
         "acceptance_command": task.acceptance_command,
-        "depends_on": list(task.depends_on),
     }
+    item.update(dependency_metadata_dict(task))
+    return item
 
 
 def _render_task_prompt(
@@ -812,8 +821,10 @@ def _plan_task_blockers(
     ignore_dependency_state: bool = False,
     all_plans: tuple[FeaturePlan, ...] | None = None,
 ) -> list[str]:
+    plans = all_plans or (plan,)
+    queries = WorkflowQueries(config, plans=plans)
     blockers: list[str] = []
-    blockers.extend(_feature_dependency_blockers(plan, all_plans or (plan,)))
+    blockers.extend(queries.feature_dependency_blockers(plan, plans))
     if task.status != "ready":
         blockers.append(f"status is {task.status}, not ready")
     worker_id = task.worker or "default"
@@ -832,11 +843,15 @@ def _plan_task_blockers(
             blockers.append(f"unknown dependency '{dep}'")
 
     if not ignore_dependency_state:
-        states = StateStore(config.runs_root).load()
-        for dep in task.depends_on:
-            dep_state = states.get(dep)
-            if not dep_state or dep_state.status != "merged":
-                blockers.append(f"dependency '{dep}' is not merged")
+        known_task_ids = {item.id for plan_item in plans for item in plan_item.tasks}
+        blockers.extend(
+            queries.dependency_blockers(
+                task,
+                known_task_ids=known_task_ids,
+                quote=True,
+                include_prompt_staleness=False,
+            )
+        )
     return blockers
 
 
@@ -860,16 +875,8 @@ def _batch_selection_blocker(
     return "not selected for this batch"
 
 
-def _feature_dependency_blockers(plan: FeaturePlan, all_plans: tuple[FeaturePlan, ...]) -> list[str]:
-    by_feature = {item.feature_id: item for item in all_plans}
-    blockers: list[str] = []
-    for dep in plan.depends_on_features:
-        dep_plan = by_feature.get(dep)
-        if not dep_plan:
-            blockers.append(f"unknown feature dependency '{dep}'")
-        elif dep_plan.status != "done":
-            blockers.append(f"depends on {dep}")
-    return blockers
+def _export_ready_status_allowed(status: str, force: bool) -> bool:
+    return status == "ready" or (force and status == "exported")
 
 
 def _feature_dependency_cycles(plans: tuple[FeaturePlan, ...]) -> list[list[str]]:

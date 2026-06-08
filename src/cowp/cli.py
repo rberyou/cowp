@@ -47,6 +47,11 @@ from cowp.planning import (
     plan_status_lines,
     validate_plan_collection,
 )
+from cowp.queries import (
+    WorkflowQueries,
+    review_finding_blockers as query_review_finding_blockers,
+    review_freshness,
+)
 from cowp.runner import RunnerError, run_tasks
 from cowp.server import ServerError, serve_backlog
 from cowp.state import StateStore, TaskState, now_iso
@@ -265,6 +270,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def cmd_validate(args: argparse.Namespace) -> int:
     config, manifest = load_inputs(args)
     result = validate_project(config, manifest)
+    extend_manifest_workflow_validation(config, manifest, result)
     print_validation(result)
     return 0 if result.ok else 1
 
@@ -366,6 +372,8 @@ def cmd_start(args: argparse.Namespace) -> int:
         return 1
     store = StateStore(config.runs_root)
     states = store.load()
+    queries = WorkflowQueries(config, manifest=manifest, plans=load_all_plans(config), states=states)
+    known_task_ids = {task.id for task in manifest.tasks}
     if args.task:
         task_ids = list(args.task)
     else:
@@ -373,12 +381,16 @@ def cmd_start(args: argparse.Namespace) -> int:
             task.id
             for task in manifest.tasks
             if not states.get(task.id) or states[task.id].status not in START_SKIP_STATUSES
+            if not queries.run_blockers(task, known_task_ids=known_task_ids)
         ]
     if not task_ids:
         print("no tasks to start")
         return 0
     tasks = selected_tasks(manifest, task_ids)
     for task in tasks:
+        blockers = queries.run_blockers(task, known_task_ids=known_task_ids)
+        if blockers:
+            raise ConfigError(f"{task.id}: task is not startable: {'; '.join(blockers)}")
         worktree = create_worktree(config, task, skip_clean_check=args.skip_clean_check)
         base_sha = head_sha(worktree)
         store.update(
@@ -428,6 +440,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         }
     else:
         task_ids = set(args.task)
+        states = StateStore(config.runs_root).load()
+        queries = WorkflowQueries(config, manifest=manifest, plans=load_all_plans(config), states=states)
+        known_task_ids = {task.id for task in manifest.tasks}
+        for task in selected_tasks(manifest, task_ids):
+            blockers = queries.run_blockers(task, known_task_ids=known_task_ids)
+            if blockers:
+                raise ConfigError(f"{task.id}: task is not runnable: {'; '.join(blockers)}")
     if not task_ids:
         print("no tasks to run")
         return 0
@@ -440,6 +459,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     config, manifest = load_inputs(args)
     states = StateStore(config.runs_root).load()
+    queries = WorkflowQueries(config, manifest=manifest, plans=load_all_plans(config), states=states)
+    known_task_ids = {task.id for task in manifest.tasks}
     for task in manifest.tasks:
         state = states.get(task.id)
         worktree = task_worktree(config, task.id)
@@ -451,11 +472,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"  git: {compact(task_status(worktree))}")
         if state and state.log_path:
             print(f"  log: {state.log_path}")
+        blockers = queries.run_blockers(task, known_task_ids=known_task_ids)
+        if blockers:
+            print("  blocked_by: " + "; ".join(blockers))
         if state and state.review_snapshot_hash:
-            freshness = "fresh"
-            if state.current_snapshot_hash and state.current_snapshot_hash != state.review_snapshot_hash:
-                freshness = "stale"
-            print(f"  review: {freshness} snapshot={state.review_snapshot_hash}")
+            freshness = review_freshness(state)
+            print(f"  review: {freshness.status} snapshot={state.review_snapshot_hash}")
         if state and state.task_review_findings:
             blockers = review_finding_blockers(state.task_review_findings)
             if blockers:
@@ -698,6 +720,26 @@ def load_inputs(args: argparse.Namespace) -> tuple[ProjectConfig, Manifest]:
     return config, manifest
 
 
+def extend_manifest_workflow_validation(config: ProjectConfig, manifest: Manifest, result) -> None:
+    plans = load_all_plans(config)
+    queries = WorkflowQueries(config, manifest=manifest, plans=plans)
+    known_task_ids = {task.id for task in manifest.tasks}
+    for task in manifest.tasks:
+        state = queries.states.get(task.id)
+        if state and state.status == "merged":
+            continue
+        for blocker in queries.run_blockers(task, known_task_ids=known_task_ids):
+            text = f"{task.id}: {blocker}"
+            if (
+                "dependency metadata is stale" in blocker
+                or blocker.startswith("manifest task is ")
+                or blocker.startswith("unknown dependency")
+            ):
+                result.errors.append(text)
+            else:
+                result.warnings.append(text)
+
+
 def selected_plans(config: ProjectConfig, args: argparse.Namespace):
     if getattr(args, "all", False):
         return load_all_plans(config)
@@ -789,20 +831,10 @@ def finish_gate(
     state: TaskState,
     reviewed_files: list[str],
 ) -> str | None:
-    if state.status in {"superseded", "withdrawn"}:
-        store.append_audit_event(task.id, "finish", "refused terminal non-mergeable task", status=state.status)
-        raise GitError(f"{task.id}: task status is non-mergeable: {state.status}")
-    if not state.review_diff_path or not Path(state.review_diff_path).is_file():
-        store.append_audit_event(task.id, "finish", "refused finish without review material")
-        raise GitError(f"{task.id}: no review material; run cowp review first")
-    if not state.review_snapshot_hash:
-        store.append_audit_event(task.id, "finish", "refused finish without review snapshot hash")
-        raise GitError(f"{task.id}: review snapshot hash is missing; run cowp review first")
-
-    blockers = review_finding_blockers(state.task_review_findings or [])
+    blockers = WorkflowQueries(config, states={task.id: state}).merge_blockers(task, state)
     if blockers:
-        store.append_audit_event(task.id, "finish", "refused finish with review blockers", blockers=blockers)
-        raise GitError(f"{task.id}: review blockers remain: {'; '.join(blockers)}")
+        store.append_audit_event(task.id, "finish", "refused finish with merge blockers", blockers=blockers)
+        raise GitError(f"{task.id}: merge blockers remain: {'; '.join(blockers)}")
 
     outside_review = [path for path in reviewed_files if not reviewed_path_allowed(path, task.allowed_files)]
     if outside_review:
@@ -874,19 +906,7 @@ def should_preserve_review_snapshot(state: TaskState, status: str, diff: str) ->
 
 
 def review_finding_blockers(findings: list[dict]) -> list[str]:
-    blockers: list[str] = []
-    for finding in findings:
-        finding_id = str(finding.get("id") or "<finding>")
-        status = str(finding.get("status") or "open")
-        if status == "open":
-            blockers.append(f"{finding_id} open")
-        if status == "wontfix" and is_disallowed_wontfix(finding):
-            blockers.append(f"{finding_id} disallowed wontfix")
-        if status != "invalid" and str(finding.get("type") or "") == "boundary":
-            blockers.append(f"{finding_id} active boundary")
-        if status != "invalid" and bool(finding.get("contract_change", False)):
-            blockers.append(f"{finding_id} active contract_change")
-    return blockers
+    return query_review_finding_blockers(findings)
 
 
 def reviewed_path_allowed(path: str, allowed_files: tuple[str, ...]) -> bool:

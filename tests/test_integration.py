@@ -316,6 +316,57 @@ def test_finish_requires_review_material(
     assert any(event["command"] == "finish" for event in state.task_audit_events)
 
 
+def test_finish_uses_query_layer_merge_blockers(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+    monkeypatch,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "query gated",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+
+    def fake_merge_blockers(self, task, state):
+        return ["query gate"]
+
+    monkeypatch.setattr("cowp.cli.WorkflowQueries.merge_blockers", fake_merge_blockers)
+
+    code = main(
+        [
+            "finish",
+            "--repo",
+            str(git_repo),
+            "--manifest",
+            str(manifest),
+            "--task",
+            "TASK-001",
+            "--reviewed-files",
+            "src/example.py",
+        ]
+    )
+
+    assert code == 1
+    state = StateStore(git_repo.parent / "repo.runs").load()["TASK-001"]
+    assert any(
+        event["command"] == "finish"
+        and event["message"] == "refused finish with merge blockers"
+        and event["details"]["blockers"] == ["query gate"]
+        for event in state.task_audit_events
+    )
+
+
 def test_review_finding_blocks_finish_until_resolved_and_review_refreshed(
     git_repo: Path,
     workerpool_config: Path,
@@ -781,6 +832,50 @@ def test_run_all_skips_completed_tasks_in_manifest(
     states = store.load()
     assert states["TASK-001"].status == "merged"
     assert states["TASK-002"].status == "worker_succeeded"
+
+
+def test_worker_succeeded_dependency_does_not_unlock_downstream_run(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+    capsys,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "dependency",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            },
+            {
+                "id": "TASK-002",
+                "title": "downstream",
+                "prompt_file": ".codex-workerpool/tasks/TASK-002.md",
+                "allowed_files": ["tests/test_example.py"],
+                "depends_on": ["TASK-001"],
+            },
+        ],
+    )
+    store = StateStore(git_repo.parent / "repo.runs")
+
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert (git_repo.parent / "repo.worktrees" / "TASK-001").exists()
+    assert not (git_repo.parent / "repo.worktrees" / "TASK-002").exists()
+
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    states = store.load()
+    assert states["TASK-001"].status == "worker_succeeded"
+    assert "TASK-002" not in states
+
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-002"]) == 1
+    assert "TASK-002: task is not startable: dependency TASK-001 is not merged" in capsys.readouterr().err
+
+    store.update("TASK-001", status="merged")
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-002"]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-002"]) == 0
+    assert store.load()["TASK-002"].status == "worker_succeeded"
 
 
 def test_start_reports_agent_branch_collision_before_git_worktree_add(

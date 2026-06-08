@@ -6,6 +6,7 @@ from pathlib import Path
 from cowp.cli import main
 from cowp.config import load_project_config, write_json
 from cowp.planning import export_ready_tasks, load_plan, validate_plan
+from cowp.queries import dependency_mapping_hash
 from cowp.state import StateStore
 from tests.conftest import run
 
@@ -385,9 +386,87 @@ def test_export_ready_prompt_includes_dependency_contract(
     exported = export_ready_tasks(config, load_plan(git_repo, path), ".codex-workerpool/tasks.json")
 
     assert exported == ["TASK-002"]
+    manifest = json.loads((git_repo / ".codex-workerpool" / "tasks.json").read_text(encoding="utf-8"))
+    manifest_task = manifest["tasks"][0]
+    assert manifest_task["depends_on"] == ["TASK-001"]
+    assert manifest_task["declared_depends_on"] == ["TASK-001"]
+    assert manifest_task["effective_depends_on"] == ["TASK-001"]
+    assert manifest_task["dependency_mapping_hash"] == dependency_mapping_hash(("TASK-001",), ("TASK-001",))
     prompt = (git_repo / ".codex-workerpool" / "tasks" / "TASK-002.md").read_text(encoding="utf-8")
     assert "## Dependency Contracts" in prompt
     assert "POST /api/v1/reviews/{note_id}/sessions" in prompt
+
+
+def test_validate_blocks_stale_exported_dependency_metadata(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+    capsys,
+):
+    data = {
+        "feature_id": "FEATURE-001",
+        "title": "stale metadata",
+        "status": "draft",
+        "markdown": ".codex-workerpool/plans/FEATURE-001.md",
+        "open_decisions": [],
+        "review_findings": [],
+        "tasks": [
+            {
+                "id": "TASK-001",
+                "title": "api",
+                "status": "exported",
+                "allowed_files": ["src/example.py"],
+                "prompt": "WRITE src/example.py",
+                "contract": "Defines the API.",
+            },
+            {
+                "id": "TASK-002",
+                "title": "helper",
+                "status": "ready",
+                "depends_on": ["TASK-001"],
+                "allowed_files": ["tests/test_example.py"],
+                "prompt": "WRITE tests/test_example.py",
+            },
+        ],
+    }
+    path = _write_plan(git_repo, data)
+    config = load_project_config(git_repo)
+    StateStore(config.runs_root).update("TASK-001", status="merged")
+
+    assert export_ready_tasks(config, load_plan(git_repo, path), ".codex-workerpool/tasks.json") == ["TASK-002"]
+
+    exported_plan = json.loads(path.read_text(encoding="utf-8"))
+    exported_plan["tasks"][1]["depends_on"] = []
+    write_json(path, exported_plan)
+
+    assert main(["validate", "--repo", str(git_repo), "--manifest", ".codex-workerpool/tasks.json"]) == 1
+    captured = capsys.readouterr()
+    assert "TASK-002 dependency metadata is stale; re-export task prompt" in captured.err
+
+    assert (
+        main(
+            [
+                "plan",
+                "export-ready",
+                "--repo",
+                str(git_repo),
+                "--plan",
+                str(path),
+                "--manifest",
+                ".codex-workerpool/tasks.json",
+                "--task",
+                "TASK-002",
+                "--force",
+            ]
+        )
+        == 0
+    )
+    manifest = json.loads((git_repo / ".codex-workerpool" / "tasks.json").read_text(encoding="utf-8"))
+    manifest_task = manifest["tasks"][0]
+    assert manifest_task["id"] == "TASK-002"
+    assert manifest_task["depends_on"] == []
+    assert manifest_task["declared_depends_on"] == []
+    assert main(["validate", "--repo", str(git_repo), "--manifest", ".codex-workerpool/tasks.json"]) == 0
 
 
 def test_export_ready_prompt_includes_task_and_feature_contracts(

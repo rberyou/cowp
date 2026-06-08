@@ -6,6 +6,7 @@ from typing import Any
 
 from cowp.config import ConfigError, ProjectConfig, load_json
 from cowp.planning import FeaturePlan, PlanTask, load_all_plans, validate_plan_collection
+from cowp.queries import WorkflowQueries, review_finding_blockers
 from cowp.state import StateStore, TaskState, now_iso
 
 KANBAN_COLUMNS = (
@@ -80,21 +81,22 @@ class BacklogSnapshot:
 def build_backlog_snapshot(config: ProjectConfig) -> BacklogSnapshot:
     plans = load_all_plans(config)
     states = StateStore(config.runs_root).load()
+    queries = WorkflowQueries(config, plans=plans, states=states)
     validation = validate_plan_collection(config, plans)
     features_by_column: dict[str, list[BacklogFeature]] = {title: [] for title in KANBAN_COLUMNS}
     seen_task_ids: set[str] = set()
 
     for plan in plans:
-        tasks = tuple(_task_snapshot(plan, task, plans, states, states.get(task.id)) for task in plan.tasks)
+        tasks = tuple(_task_snapshot(plan, task, plans, states.get(task.id), queries) for task in plan.tasks)
         seen_task_ids.update(task.task_id for task in tasks)
         if tasks:
             for column in KANBAN_COLUMNS:
                 column_tasks = tuple(task for task in tasks if task.column == column)
                 if column_tasks:
-                    features_by_column[column].append(_feature_snapshot(plan, column, plans, column_tasks))
+                    features_by_column[column].append(_feature_snapshot(plan, column, plans, column_tasks, queries))
         else:
-            column = backlog_column_for_plan(plan, plans, states)
-            features_by_column[column].append(_feature_snapshot(plan, column, plans, ()))
+            column = backlog_column_for_plan(plan, plans, states, queries)
+            features_by_column[column].append(_feature_snapshot(plan, column, plans, (), queries))
 
     manifest_errors: list[str] = []
     unassigned_tasks = _unassigned_manifest_tasks(config, seen_task_ids, states, manifest_errors)
@@ -168,7 +170,9 @@ def backlog_column_for_plan(
     plan: FeaturePlan,
     all_plans: tuple[FeaturePlan, ...],
     states: dict[str, TaskState],
+    queries: WorkflowQueries | None = None,
 ) -> str:
+    workflow = queries or WorkflowQueries(config=None, plans=all_plans, states=states)
     if _unresolved_decisions(plan):
         return "Clarify"
     state_names = {state.status for task in plan.tasks if (state := states.get(task.id))}
@@ -178,9 +182,9 @@ def backlog_column_for_plan(
         return "Running"
     if "worker_succeeded" in state_names:
         return "Needs Codex Review"
-    if plan.status == "blocked" or _feature_dependency_blockers(plan, all_plans):
+    if plan.status == "blocked" or workflow.feature_dependency_blockers(plan, all_plans):
         return "Blocked"
-    if plan.status == "done" or _all_tasks_merged(plan, states):
+    if plan.status == "done" or workflow.is_feature_done(plan):
         return "Merged"
     if plan.status == "exported" or any(task.status == "exported" for task in plan.tasks):
         return "Exported"
@@ -196,6 +200,7 @@ def _feature_snapshot(
     column: str,
     all_plans: tuple[FeaturePlan, ...],
     tasks: tuple[BacklogTask, ...],
+    queries: WorkflowQueries,
 ) -> BacklogFeature:
     return BacklogFeature(
         feature_id=plan.feature_id,
@@ -203,7 +208,7 @@ def _feature_snapshot(
         status=plan.status,
         column=column,
         depends_on_features=plan.depends_on_features,
-        blockers=tuple(_feature_dependency_blockers(plan, all_plans)),
+        blockers=tuple(queries.feature_dependency_blockers(plan, all_plans)),
         open_decisions=tuple(_unresolved_decisions(plan)),
         review_findings=tuple(_unresolved_findings(plan)),
         tasks=tasks,
@@ -214,10 +219,10 @@ def _task_snapshot(
     plan: FeaturePlan,
     task: PlanTask,
     all_plans: tuple[FeaturePlan, ...],
-    states: dict[str, TaskState],
     state: TaskState | None,
+    queries: WorkflowQueries,
 ) -> BacklogTask:
-    blockers = tuple(_task_blockers(plan, task, all_plans, states))
+    blockers = tuple(_task_blockers(plan, task, all_plans, queries))
     review_blockers = tuple(_task_review_blockers(state))
     combined_blockers = tuple([*blockers, *review_blockers])
     column = backlog_column_for_task(plan, task, state, combined_blockers)
@@ -370,19 +375,7 @@ def _column_for_execution_status(status: str) -> str | None:
 def _task_review_blockers(state: TaskState | None) -> list[str]:
     if not state:
         return []
-    blockers: list[str] = []
-    for finding in state.task_review_findings or []:
-        finding_id = str(finding.get("id") or "<finding>")
-        status = str(finding.get("status") or "open")
-        if status == "open":
-            blockers.append(f"{finding_id} open")
-        if status == "wontfix" and _is_disallowed_wontfix(finding):
-            blockers.append(f"{finding_id} disallowed wontfix")
-        if status != "invalid" and str(finding.get("type") or "") == "boundary":
-            blockers.append(f"{finding_id} active boundary")
-        if status != "invalid" and bool(finding.get("contract_change", False)):
-            blockers.append(f"{finding_id} active contract_change")
-    return blockers
+    return review_finding_blockers(state.task_review_findings)
 
 
 def _task_review_finding_lines(state: TaskState | None) -> list[str]:
@@ -400,61 +393,32 @@ def _task_review_finding_lines(state: TaskState | None) -> list[str]:
     return lines
 
 
-def _is_disallowed_wontfix(finding: dict[str, Any]) -> bool:
-    severity = str(finding.get("severity") or "").upper()
-    return (
-        severity in {"P0", "P1"}
-        or str(finding.get("type") or "") == "boundary"
-        or bool(finding.get("contract_change", False))
-    )
-
-
 def _task_dependency_blockers(
     plan: FeaturePlan,
     task: PlanTask,
-    states: dict[str, TaskState],
+    queries: WorkflowQueries,
 ) -> list[str]:
     task_ids = {item.id for item in plan.tasks}
-    blockers: list[str] = []
-    for dep in task.depends_on:
-        if dep not in task_ids:
-            blockers.append(f"unknown dependency '{dep}'")
-            continue
-        dep_state = states.get(dep)
-        if not dep_state or dep_state.status != "merged":
-            blockers.append(f"dependency {dep} is not merged")
-    return blockers
+    return queries.dependency_blockers(
+        task,
+        known_task_ids=task_ids,
+        include_prompt_staleness=False,
+    )
 
 
 def _task_blockers(
     plan: FeaturePlan,
     task: PlanTask,
     all_plans: tuple[FeaturePlan, ...],
-    states: dict[str, TaskState],
+    queries: WorkflowQueries,
 ) -> list[str]:
     blockers: list[str] = []
     if task.status == "blocked":
         blockers.append("task plan status is blocked")
     if task.status in {"ready", "exported", "blocked"}:
-        blockers.extend(_feature_dependency_blockers(plan, all_plans))
-        blockers.extend(_task_dependency_blockers(plan, task, states))
+        blockers.extend(queries.feature_dependency_blockers(plan, all_plans))
+        blockers.extend(_task_dependency_blockers(plan, task, queries))
     return blockers
-
-
-def _feature_dependency_blockers(plan: FeaturePlan, all_plans: tuple[FeaturePlan, ...]) -> list[str]:
-    by_feature = {item.feature_id: item for item in all_plans}
-    blockers: list[str] = []
-    for dep in plan.depends_on_features:
-        dep_plan = by_feature.get(dep)
-        if not dep_plan:
-            blockers.append(f"unknown feature dependency '{dep}'")
-        elif dep_plan.status != "done":
-            blockers.append(f"depends on {dep}")
-    return blockers
-
-
-def _all_tasks_merged(plan: FeaturePlan, states: dict[str, TaskState]) -> bool:
-    return bool(plan.tasks) and all(states.get(task.id) and states[task.id].status == "merged" for task in plan.tasks)
 
 
 def _unresolved_decisions(plan: FeaturePlan) -> list[str]:

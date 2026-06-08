@@ -62,6 +62,12 @@ class ManifestTask:
     feature_id: str | None = None
     acceptance_command: str | None = None
     depends_on: tuple[str, ...] = ()
+    declared_depends_on: tuple[str, ...] = ()
+    effective_depends_on: tuple[str, ...] = ()
+    dependency_mapping_hash: str | None = None
+    dependency_metadata_present: bool = False
+    active: bool = True
+    withdrawn: bool = False
 
 
 @dataclass(frozen=True)
@@ -222,7 +228,23 @@ def load_manifest(config_or_repo: ProjectConfig | Path, manifest_path: str | Pat
         if not prompt_raw:
             raise ConfigError(f"{task_id or '<missing id>'}: prompt_file is required")
         allowed_files = tuple(str(p).replace("\\", "/") for p in raw.get("allowed_files") or ())
-        depends_on = tuple(str(d).strip() for d in raw.get("depends_on") or ())
+        dependency_metadata_present = any(
+            key in raw
+            for key in (
+                "declared_depends_on",
+                "effective_depends_on",
+                "dependency_mapping_hash",
+            )
+        )
+        declared_raw = raw.get("declared_depends_on")
+        if declared_raw is None:
+            declared_raw = raw.get("depends_on") or ()
+        declared_depends_on = tuple(str(d).strip() for d in declared_raw if str(d).strip())
+        effective_raw = raw.get("effective_depends_on")
+        if effective_raw is None:
+            effective_raw = raw.get("depends_on") or declared_depends_on
+        effective_depends_on = tuple(str(d).strip() for d in effective_raw if str(d).strip())
+        depends_on = effective_depends_on
         tasks.append(
             ManifestTask(
                 id=task_id,
@@ -233,6 +255,12 @@ def load_manifest(config_or_repo: ProjectConfig | Path, manifest_path: str | Pat
                 feature_id=_optional_str(raw.get("feature_id")),
                 acceptance_command=_optional_str(raw.get("acceptance_command")),
                 depends_on=depends_on,
+                declared_depends_on=declared_depends_on,
+                effective_depends_on=effective_depends_on,
+                dependency_mapping_hash=_optional_str(raw.get("dependency_mapping_hash")),
+                dependency_metadata_present=dependency_metadata_present,
+                active=bool(raw.get("active", True)),
+                withdrawn=bool(raw.get("withdrawn", False)),
             )
         )
     return Manifest(path=path, tasks=tuple(tasks))
@@ -264,7 +292,7 @@ def validate_project(config: ProjectConfig, manifest: Manifest) -> ValidationRes
             result.errors.append(f"{task.id}: prompt file not found: {task.prompt_file}")
         if not task.allowed_files:
             result.warnings.append(f"{task.id}: allowed_files is empty")
-        for dep in task.depends_on:
+        for dep in {*task.declared_depends_on, *task.effective_depends_on}:
             if dep not in seen and not any(other.id == dep for other in manifest.tasks):
                 result.errors.append(f"{task.id}: unknown dependency '{dep}'")
 

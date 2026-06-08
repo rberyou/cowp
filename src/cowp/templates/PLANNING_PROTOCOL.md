@@ -67,8 +67,9 @@ Tasks can be marked:
   in `runs_root/state.json`
 - `done`: feature-level terminal state; all non-dropped tasks have merged
 
-Feature plans may also use `depends_on_features`. A feature dependency is
-satisfied only when the dependency feature status is `done`.
+Feature plans may also use `depends_on_features`. A feature dependency uses
+query-layer feature completion, normally explicit `status: done` or all
+upstream tasks merged.
 
 ### 5. Review Gate
 
