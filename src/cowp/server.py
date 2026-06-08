@@ -265,6 +265,23 @@ def dashboard_html(refresh_ms: int) -> str:
       font-size: 11px;
       white-space: nowrap;
     }}
+    .badge.failed,
+    .badge.worker_failed {{
+      background: #f8d7da;
+      color: var(--danger);
+    }}
+    .badge.running {{
+      background: #d7ecf7;
+      color: var(--accent);
+    }}
+    .badge.worker_succeeded {{
+      background: #fff3cd;
+      color: var(--warn);
+    }}
+    .badge.merged {{
+      background: #d8f0df;
+      color: #23603a;
+    }}
     .feature-body {{
       border-top: 1px solid var(--line);
       padding: 8px 9px 9px;
@@ -383,15 +400,17 @@ def dashboard_html(refresh_ms: int) -> str:
       const root = el('div', 'task');
       const main = el('div', 'task-main');
       main.appendChild(el('span', '', task.task_id + ' ' + task.title));
-      main.appendChild(el('span', 'badge', task.execution_status));
+      main.appendChild(el('span', 'badge ' + text(task.execution_status), task.execution_status));
       root.appendChild(main);
       const grid = el('div', 'task-grid');
       const dependsOn = (task.depends_on || []).join(', ');
       const blockers = (task.blockers || []).join('; ');
+      const reviewFindings = (task.review_findings || []).join('; ');
       const pairs = [
         ['plan', task.plan_status],
         ['depends_on', dependsOn],
         ['blocked_by', blockers],
+        ['review_findings', reviewFindings],
         ['worker', task.worker],
         ['branch', task.branch],
         ['worktree', task.worktree],
@@ -399,6 +418,7 @@ def dashboard_html(refresh_ms: int) -> str:
         ['allowed', task.allowed_files_count],
         ['log', task.log_path],
         ['review', task.review_diff_path],
+        ['review_hash', task.review_snapshot_hash],
         ['final', task.final_diff_path],
       ];
       for (const [key, value] of pairs) {{

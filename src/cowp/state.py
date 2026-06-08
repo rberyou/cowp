@@ -33,6 +33,15 @@ class TaskState:
     worker_acceptance_exit_code: int | None = None
     main_acceptance_command: str | None = None
     main_acceptance_exit_code: int | None = None
+    task_review_findings: list[dict[str, Any]] | None = None
+    task_audit_events: list[dict[str, Any]] | None = None
+    review_snapshot_hash: str | None = None
+    current_snapshot_hash: str | None = None
+    task_branch_base_sha: str | None = None
+    finish_attempts: list[dict[str, Any]] | None = None
+    superseded_reason: str | None = None
+    superseded_at: str | None = None
+    superseded_finding_ids: list[str] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -53,6 +62,15 @@ class TaskState:
             "worker_acceptance_exit_code": self.worker_acceptance_exit_code,
             "main_acceptance_command": self.main_acceptance_command,
             "main_acceptance_exit_code": self.main_acceptance_exit_code,
+            "task_review_findings": self.task_review_findings or [],
+            "task_audit_events": self.task_audit_events or [],
+            "review_snapshot_hash": self.review_snapshot_hash,
+            "current_snapshot_hash": self.current_snapshot_hash,
+            "task_branch_base_sha": self.task_branch_base_sha,
+            "finish_attempts": self.finish_attempts or [],
+            "superseded_reason": self.superseded_reason,
+            "superseded_at": self.superseded_at,
+            "superseded_finding_ids": self.superseded_finding_ids or [],
         }
 
     @classmethod
@@ -75,6 +93,17 @@ class TaskState:
             worker_acceptance_exit_code=data.get("worker_acceptance_exit_code"),
             main_acceptance_command=data.get("main_acceptance_command"),
             main_acceptance_exit_code=data.get("main_acceptance_exit_code"),
+            task_review_findings=_list_of_dicts(data.get("task_review_findings")),
+            task_audit_events=_list_of_dicts(data.get("task_audit_events")),
+            review_snapshot_hash=data.get("review_snapshot_hash"),
+            current_snapshot_hash=data.get("current_snapshot_hash"),
+            task_branch_base_sha=data.get("task_branch_base_sha"),
+            finish_attempts=_list_of_dicts(data.get("finish_attempts")),
+            superseded_reason=data.get("superseded_reason"),
+            superseded_at=data.get("superseded_at"),
+            superseded_finding_ids=list(data["superseded_finding_ids"])
+            if isinstance(data.get("superseded_finding_ids"), list)
+            else [],
         )
 
 
@@ -119,3 +148,28 @@ class StateStore:
             states[task_id] = TaskState.from_json(data)
             self.save(states)
             return states[task_id]
+
+    def append_audit_event(self, task_id: str, command: str, message: str, **details: Any) -> TaskState:
+        with _STATE_LOCK:
+            states = self.load()
+            current = states.get(task_id) or TaskState(
+                task_id=task_id,
+                status="planned",
+                updated_at=now_iso(),
+            )
+            events = list(current.task_audit_events or [])
+            events.append(
+                {
+                    "at": now_iso(),
+                    "command": command,
+                    "message": message,
+                    "details": details,
+                }
+            )
+            return self.update(task_id, task_audit_events=events)
+
+
+def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]

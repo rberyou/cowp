@@ -202,6 +202,56 @@ def test_snapshot_places_tasks_in_their_own_columns_with_feature_grouping(
     )
 
 
+def test_worker_succeeded_with_open_review_finding_moves_to_review_blocked(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "review blockers",
+            "status": "exported",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "needs fix",
+                    "status": "exported",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                }
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    StateStore(config.runs_root).update(
+        "TASK-001",
+        status="worker_succeeded",
+        task_review_findings=[
+            {
+                "id": "RF-001",
+                "type": "bug",
+                "severity": "P2",
+                "status": "open",
+                "message": "missing edge case",
+            }
+        ],
+    )
+
+    data = backlog_snapshot_to_dict(build_backlog_snapshot(config))
+
+    blocked = _feature(_column(data, "Review Blocked"), "FEATURE-001")
+    assert blocked["tasks"][0]["task_id"] == "TASK-001"
+    assert blocked["tasks"][0]["blockers"] == ["RF-001 open"]
+    assert blocked["tasks"][0]["review_findings"] == ["RF-001 open P2 bug: missing edge case"]
+    assert not _column(data, "Needs Codex Review")["features"]
+
+
 def test_backlog_status_lines_render_from_snapshot(git_repo: Path, workerpool_config: Path):
     _write_feature_plan(
         git_repo,

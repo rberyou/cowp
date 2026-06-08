@@ -16,6 +16,7 @@ KANBAN_COLUMNS = (
     "Exported",
     "Running",
     "Needs Codex Review",
+    "Review Blocked",
     "Blocked",
     "Failed",
     "Merged",
@@ -31,6 +32,7 @@ class BacklogTask:
     plan_status: str | None
     depends_on: tuple[str, ...]
     blockers: tuple[str, ...]
+    review_findings: tuple[str, ...]
     execution_status: str
     worker: str | None
     branch: str | None
@@ -40,6 +42,8 @@ class BacklogTask:
     log_path: str | None
     review_diff_path: str | None
     final_diff_path: str | None
+    review_snapshot_hash: str | None
+    current_snapshot_hash: str | None
 
 
 @dataclass(frozen=True)
@@ -214,7 +218,9 @@ def _task_snapshot(
     state: TaskState | None,
 ) -> BacklogTask:
     blockers = tuple(_task_blockers(plan, task, all_plans, states))
-    column = backlog_column_for_task(plan, task, state, blockers)
+    review_blockers = tuple(_task_review_blockers(state))
+    combined_blockers = tuple([*blockers, *review_blockers])
+    column = backlog_column_for_task(plan, task, state, combined_blockers)
     return BacklogTask(
         task_id=task.id,
         title=task.title,
@@ -222,7 +228,8 @@ def _task_snapshot(
         column=column,
         plan_status=task.status,
         depends_on=task.depends_on,
-        blockers=blockers,
+        blockers=combined_blockers,
+        review_findings=tuple(_task_review_finding_lines(state)),
         execution_status=state.status if state else "planned",
         worker=state.worker if state and state.worker else task.worker or "default",
         branch=state.branch if state else None,
@@ -232,6 +239,8 @@ def _task_snapshot(
         log_path=state.log_path if state else None,
         review_diff_path=state.review_diff_path if state else None,
         final_diff_path=state.final_diff_path if state else None,
+        review_snapshot_hash=state.review_snapshot_hash if state else None,
+        current_snapshot_hash=state.current_snapshot_hash if state else None,
     )
 
 
@@ -242,6 +251,8 @@ def backlog_column_for_task(
     blockers: tuple[str, ...],
 ) -> str:
     if state:
+        if state.status == "worker_succeeded" and _task_review_blockers(state):
+            return "Review Blocked"
         state_column = _column_for_execution_status(state.status)
         if state_column:
             return state_column
@@ -297,6 +308,7 @@ def _unassigned_manifest_tasks(
                 plan_status=None,
                 depends_on=tuple(str(dep).strip() for dep in raw.get("depends_on") or [] if str(dep).strip()),
                 blockers=(),
+                review_findings=tuple(_task_review_finding_lines(state)),
                 execution_status=state.status if state else "planned",
                 worker=state.worker if state and state.worker else _optional_str(raw.get("worker")),
                 branch=state.branch if state else None,
@@ -306,6 +318,8 @@ def _unassigned_manifest_tasks(
                 log_path=state.log_path if state else None,
                 review_diff_path=state.review_diff_path if state else None,
                 final_diff_path=state.final_diff_path if state else None,
+                review_snapshot_hash=state.review_snapshot_hash if state else None,
+                current_snapshot_hash=state.current_snapshot_hash if state else None,
             )
         )
     return result
@@ -330,6 +344,8 @@ def _feature_lines(feature: BacklogFeature) -> list[str]:
             lines.append("      depends_on: " + ", ".join(task.depends_on))
         if task.blockers:
             lines.append("      blocked_by: " + "; ".join(task.blockers))
+        if task.review_findings:
+            lines.append("      review_findings: " + "; ".join(task.review_findings))
     return lines
 
 
@@ -349,6 +365,48 @@ def _column_for_execution_status(status: str) -> str | None:
     if status == "merged":
         return "Merged"
     return None
+
+
+def _task_review_blockers(state: TaskState | None) -> list[str]:
+    if not state:
+        return []
+    blockers: list[str] = []
+    for finding in state.task_review_findings or []:
+        finding_id = str(finding.get("id") or "<finding>")
+        status = str(finding.get("status") or "open")
+        if status == "open":
+            blockers.append(f"{finding_id} open")
+        if status == "wontfix" and _is_disallowed_wontfix(finding):
+            blockers.append(f"{finding_id} disallowed wontfix")
+        if status != "invalid" and str(finding.get("type") or "") == "boundary":
+            blockers.append(f"{finding_id} active boundary")
+        if status != "invalid" and bool(finding.get("contract_change", False)):
+            blockers.append(f"{finding_id} active contract_change")
+    return blockers
+
+
+def _task_review_finding_lines(state: TaskState | None) -> list[str]:
+    if not state:
+        return []
+    lines: list[str] = []
+    for finding in state.task_review_findings or []:
+        lines.append(
+            f"{finding.get('id')} "
+            f"{finding.get('status', 'open')} "
+            f"{finding.get('severity', 'P2')} "
+            f"{finding.get('type', 'bug')}: "
+            f"{finding.get('message', '')}"
+        )
+    return lines
+
+
+def _is_disallowed_wontfix(finding: dict[str, Any]) -> bool:
+    severity = str(finding.get("severity") or "").upper()
+    return (
+        severity in {"P0", "P1"}
+        or str(finding.get("type") or "") == "boundary"
+        or bool(finding.get("contract_change", False))
+    )
 
 
 def _task_dependency_blockers(
@@ -434,6 +492,7 @@ def _task_to_dict(task: BacklogTask) -> dict[str, Any]:
         "plan_status": task.plan_status,
         "depends_on": list(task.depends_on),
         "blockers": list(task.blockers),
+        "review_findings": list(task.review_findings),
         "execution_status": task.execution_status,
         "worker": task.worker,
         "branch": task.branch,
@@ -443,6 +502,8 @@ def _task_to_dict(task: BacklogTask) -> dict[str, Any]:
         "log_path": task.log_path,
         "review_diff_path": task.review_diff_path,
         "final_diff_path": task.final_diff_path,
+        "review_snapshot_hash": task.review_snapshot_hash,
+        "current_snapshot_hash": task.current_snapshot_hash,
     }
 
 

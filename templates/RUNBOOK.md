@@ -70,9 +70,10 @@ cowp backlog serve --repo . --pool-dir ..\Project.workerpool
 
 `backlog serve` starts a local, read-only dashboard that polls the same backlog
 snapshot as `backlog status`. It binds to `127.0.0.1:8765` by default and accepts
-only loopback hosts in v2.2. Backlog columns group tasks by feature, but each
-task is placed by its own derived task state. A feature can appear in multiple
-columns when its tasks are in different states.
+only loopback hosts. Backlog columns group tasks by feature, but each task is
+placed by its own derived task state. A feature can appear in multiple columns
+when its tasks are in different states. Tasks with open execution review
+findings appear in `Review Blocked`.
 
 ## 3. Export Ready Tasks
 
@@ -191,7 +192,39 @@ cowp review --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --ta
 ```
 
 `review` prints and stores git status, diff stat, and full diff under
-`runs_root/TASK-NNN/`. New untracked files are included in the review diff.
+`runs_root/TASK-NNN/`. New untracked files are included in the review diff. The
+review command also records a snapshot hash; if Codex patches the worktree after
+review, run `cowp review` again before finishing.
+
+If Codex finds issues, record them in state:
+
+```powershell
+cowp finding add `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --task TASK-001 `
+  --type bug `
+  --severity P2 `
+  --message "short finding"
+```
+
+After a patch or audit decision, resolve or update the finding:
+
+```powershell
+cowp finding resolve `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --task TASK-001 `
+  --finding RF-001 `
+  --resolution "fixed and retested"
+```
+
+Open findings block `finish`. Boundary findings and findings marked
+`contract_change` remain non-mergeable even after a normal resolution; reclassify
+mistaken findings with `cowp finding update` or mark erroneous findings
+`invalid` with audit evidence.
 
 If review passes:
 
@@ -204,10 +237,13 @@ cowp finish `
   --reviewed-files src/example.py tests/test_example.py
 ```
 
-`finish` stages only reviewed files, refuses unreviewed changes, runs acceptance
-checks, commits the worker branch, merges it, runs the controller acceptance
-check, records reviewed files/final diff/acceptance results in state, and
-removes the task worktree unless `--keep-worktree` is passed.
+`finish` requires review material, refuses stale review snapshots, stages only
+reviewed files, refuses unreviewed changes, runs worker acceptance without
+allowing it to mutate reviewed code, commits the worker branch, and merges with
+`git merge --no-ff --no-commit`. The controller acceptance check runs before the
+merge commit is created; on failure, the merge is aborted and the base branch is
+left unchanged. Finish attempts are recorded in state so a failed merge gate can
+be retried deterministically.
 
 ## 8. Refresh Local Workflow Files
 

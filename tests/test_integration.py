@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import time
 from pathlib import Path
 
@@ -115,6 +117,7 @@ def test_plan_exported_manifest_runs_execution_flow(
     assert main(["validate", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
     assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
     assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-101"]) == 0
     assert (
         main(
             [
@@ -192,6 +195,7 @@ def test_external_pool_plan_exported_manifest_runs_execution_flow(
     assert main(["validate", "--repo", str(git_repo), "--pool-dir", str(pool), "--manifest", "tasks.json"]) == 0
     assert main(["start", "--repo", str(git_repo), "--pool-dir", str(pool), "--manifest", "tasks.json"]) == 0
     assert main(["run", "--repo", str(git_repo), "--pool-dir", str(pool), "--manifest", "tasks.json", "--all"]) == 0
+    assert main(["review", "--repo", str(git_repo), "--pool-dir", str(pool), "--manifest", "tasks.json", "--task", "TASK-101"]) == 0
     assert (
         main(
             [
@@ -270,6 +274,363 @@ def test_start_run_status_review_finish_with_fake_opencode(
     assert task_state["reviewed_files"] == ["src/example.py"]
     assert Path(task_state["review_diff_path"]).is_file()
     assert Path(task_state["final_diff_path"]).is_file()
+
+
+def test_finish_requires_review_material(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "review required",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+
+    code = main(
+        [
+            "finish",
+            "--repo",
+            str(git_repo),
+            "--manifest",
+            str(manifest),
+            "--task",
+            "TASK-001",
+            "--reviewed-files",
+            "src/example.py",
+        ]
+    )
+
+    assert code == 1
+    state = StateStore(git_repo.parent / "repo.runs").load()["TASK-001"]
+    assert state.finish_attempts == []
+    assert any(event["command"] == "finish" for event in state.task_audit_events)
+
+
+def test_review_finding_blocks_finish_until_resolved_and_review_refreshed(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "review finding",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    assert (
+        main(
+            [
+                "finding",
+                "add",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--type",
+                "bug",
+                "--severity",
+                "P2",
+                "--message",
+                "missing guard",
+            ]
+        )
+        == 0
+    )
+
+    assert (
+        main(
+            [
+                "finish",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--reviewed-files",
+                "src/example.py",
+            ]
+        )
+        == 1
+    )
+
+    worktree = git_repo.parent / "repo.worktrees" / "TASK-001"
+    with (worktree / "src" / "example.py").open("a", encoding="utf-8") as handle:
+        handle.write("# review fix\n")
+    assert (
+        main(
+            [
+                "finding",
+                "resolve",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--finding",
+                "RF-001",
+                "--resolution",
+                "fixed in src/example.py",
+                "--test-command",
+                "not run",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "finish",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--reviewed-files",
+                "src/example.py",
+            ]
+        )
+        == 1
+    )
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    assert (
+        main(
+            [
+                "finish",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--reviewed-files",
+                "src/example.py",
+            ]
+        )
+        == 0
+    )
+
+
+def test_boundary_finding_blocks_finish_even_when_resolved_until_reclassified(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "boundary finding",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    assert (
+        main(
+            [
+                "finding",
+                "add",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--type",
+                "boundary",
+                "--severity",
+                "P1",
+                "--message",
+                "requires another file",
+                "--contract-change",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "finding",
+                "resolve",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--finding",
+                "RF-001",
+                "--resolution",
+                "mistakenly thought this changed contract",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "finish",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--reviewed-files",
+                "src/example.py",
+            ]
+        )
+        == 1
+    )
+    assert (
+        main(
+            [
+                "finding",
+                "update",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--finding",
+                "RF-001",
+                "--type",
+                "bug",
+                "--severity",
+                "P2",
+                "--clear-contract-change",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "finish",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--reviewed-files",
+                "src/example.py",
+            ]
+        )
+        == 0
+    )
+
+
+def test_finding_update_requires_resolution_when_closing(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "finding closure",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    assert (
+        main(
+            [
+                "finding",
+                "add",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--type",
+                "docs",
+                "--message",
+                "needs explanation",
+            ]
+        )
+        == 0
+    )
+
+    assert (
+        main(
+            [
+                "finding",
+                "update",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--finding",
+                "RF-001",
+                "--status",
+                "wontfix",
+            ]
+        )
+        == 1
+    )
+    assert (
+        main(
+            [
+                "finding",
+                "update",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--finding",
+                "RF-001",
+                "--status",
+                "wontfix",
+                "--resolution",
+                "accepted docs debt for this small task",
+            ]
+        )
+        == 0
+    )
 
 
 def test_review_includes_untracked_allowed_file_diff(
@@ -676,6 +1037,136 @@ def test_finish_rejects_unreviewed_files(
     assert code == 1
 
 
+def test_finish_rejects_reviewed_parent_directory_of_allowed_file(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    (git_repo / "src" / "other.py").write_text("OTHER = 1\n", encoding="utf-8")
+    run(["git", "add", "."], git_repo)
+    run(["git", "commit", "-m", "add other source"], git_repo)
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "parent path review",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    worktree = git_repo.parent / "repo.worktrees" / "TASK-001"
+    (worktree / "src" / "other.py").write_text("OTHER = 2\n", encoding="utf-8")
+
+    code = main(
+        [
+            "finish",
+            "--repo",
+            str(git_repo),
+            "--manifest",
+            str(manifest),
+            "--task",
+            "TASK-001",
+            "--reviewed-files",
+            "src",
+        ]
+    )
+
+    assert code == 1
+    assert "OTHER = 2" not in (git_repo / "src" / "other.py").read_text(encoding="utf-8")
+
+
+def test_finish_rejects_reviewed_directory_even_when_directory_is_allowed(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "directory review",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src"],
+            }
+        ],
+    )
+    prompt = git_repo / ".codex-workerpool" / "tasks" / "TASK-001.md"
+    prompt.write_text("# TASK-001\n\nWRITE src/example.py\n", encoding="utf-8")
+    run(["git", "add", ".codex-workerpool/tasks/TASK-001.md"], git_repo)
+    run(["git", "commit", "-m", "fix directory prompt"], git_repo)
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+
+    code = main(
+        [
+            "finish",
+            "--repo",
+            str(git_repo),
+            "--manifest",
+            str(manifest),
+            "--task",
+            "TASK-001",
+            "--reviewed-files",
+            "src",
+        ]
+    )
+
+    assert code == 1
+    assert "# TASK-001" not in (git_repo / "src" / "example.py").read_text(encoding="utf-8")
+
+
+def test_finish_rejects_reviewed_pathspec_wildcard(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "wildcard review",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src"],
+            }
+        ],
+    )
+    prompt = git_repo / ".codex-workerpool" / "tasks" / "TASK-001.md"
+    prompt.write_text("# TASK-001\n\nWRITE src/example.py\n", encoding="utf-8")
+    run(["git", "add", ".codex-workerpool/tasks/TASK-001.md"], git_repo)
+    run(["git", "commit", "-m", "fix wildcard prompt"], git_repo)
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+
+    code = main(
+        [
+            "finish",
+            "--repo",
+            str(git_repo),
+            "--manifest",
+            str(manifest),
+            "--task",
+            "TASK-001",
+            "--reviewed-files",
+            "src/*.py",
+        ]
+    )
+
+    assert code == 1
+    assert "# TASK-001" not in (git_repo / "src" / "example.py").read_text(encoding="utf-8")
+
+
 def test_finish_rejects_dirty_controller_worktree(
     git_repo: Path,
     workerpool_config: Path,
@@ -754,6 +1245,216 @@ def test_finish_rejects_worker_acceptance_failure(
     assert code == 1
 
 
+def test_review_rejects_unauthorized_worker_commit_before_finish(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "worker commit",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    worktree = git_repo.parent / "repo.worktrees" / "TASK-001"
+    run(["git", "add", "src/example.py"], worktree)
+    run(["git", "commit", "-m", "unauthorized worker commit"], worktree)
+
+    code = main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"])
+
+    assert code == 1
+
+
+def test_finish_rejects_worker_acceptance_mutating_reviewed_code(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    cfg = default_config_data(git_repo)
+    cfg["acceptance"] = {
+        "worker": _python_acceptance(
+            "from pathlib import Path; p=Path('src/example.py'); p.write_text(p.read_text() + '# acceptance\\n')"
+        ),
+        "main": None,
+    }
+    write_json(git_repo / ".codex-workerpool" / "config.json", cfg)
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "acceptance mutation",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+
+    code = main(
+        [
+            "finish",
+            "--repo",
+            str(git_repo),
+            "--manifest",
+            str(manifest),
+            "--task",
+            "TASK-001",
+            "--reviewed-files",
+            "src/example.py",
+        ]
+    )
+
+    assert code == 1
+    state = StateStore(git_repo.parent / "repo.runs").load()["TASK-001"]
+    assert state.finish_attempts == []
+
+
+def test_finish_rejects_main_acceptance_mutating_merge_result(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    cfg = default_config_data(git_repo)
+    cfg["acceptance"] = {
+        "worker": None,
+        "main": _python_acceptance(
+            "from pathlib import Path; p=Path('src/example.py'); p.write_text(p.read_text() + '# main acceptance\\n'); Path('generated.tmp').write_text('tmp\\n')"
+        ),
+    }
+    write_json(git_repo / ".codex-workerpool" / "config.json", cfg)
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "main acceptance mutation",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    before = run(["git", "rev-parse", "HEAD"], git_repo).stdout.strip()
+
+    code = main(
+        [
+            "finish",
+            "--repo",
+            str(git_repo),
+            "--manifest",
+            str(manifest),
+            "--task",
+            "TASK-001",
+            "--reviewed-files",
+            "src/example.py",
+        ]
+    )
+
+    assert code == 1
+    assert run(["git", "rev-parse", "HEAD"], git_repo).stdout.strip() == before
+    assert run(["git", "status", "--short"], git_repo).stdout.strip() == ""
+    state = StateStore(git_repo.parent / "repo.runs").load()["TASK-001"]
+    assert state.finish_attempts[-1]["status"] == "failed"
+    assert state.finish_attempts[-1]["main_acceptance_exit_code"] == 0
+    assert "main acceptance" not in (git_repo / "src" / "example.py").read_text(encoding="utf-8")
+    assert not (git_repo / "generated.tmp").exists()
+
+
+def test_main_acceptance_failure_aborts_merge_and_retry_reuses_task_commit(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    cfg = default_config_data(git_repo)
+    cfg["acceptance"] = {"worker": None, "main": "exit 9"}
+    write_json(git_repo / ".codex-workerpool" / "config.json", cfg)
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "main acceptance retry",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    before = run(["git", "rev-parse", "HEAD"], git_repo).stdout.strip()
+
+    code = main(
+        [
+            "finish",
+            "--repo",
+            str(git_repo),
+            "--manifest",
+            str(manifest),
+            "--task",
+            "TASK-001",
+            "--reviewed-files",
+            "src/example.py",
+        ]
+    )
+
+    assert code == 1
+    assert run(["git", "rev-parse", "HEAD"], git_repo).stdout.strip() == before
+    state = StateStore(git_repo.parent / "repo.runs").load()["TASK-001"]
+    assert len(state.finish_attempts) == 1
+    assert state.finish_attempts[0]["status"] == "failed"
+    assert state.finish_attempts[0]["task_commit_sha"]
+    assert state.finish_attempts[0]["review_snapshot_hash"] == state.review_snapshot_hash
+    review_diff = git_repo.parent / "repo.runs" / "TASK-001" / "review.diff"
+    original_review_diff = review_diff.read_text(encoding="utf-8")
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    assert review_diff.read_text(encoding="utf-8") == original_review_diff
+    assert (git_repo.parent / "repo.runs" / "TASK-001" / "review-retry-status.txt").is_file()
+
+    cfg["acceptance"] = {"worker": None, "main": None}
+    write_json(git_repo / ".codex-workerpool" / "config.json", cfg)
+    run(["git", "add", ".codex-workerpool/config.json"], git_repo)
+    run(["git", "commit", "-m", "fix main acceptance"], git_repo)
+
+    assert (
+        main(
+            [
+                "finish",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--reviewed-files",
+                "src/example.py",
+            ]
+        )
+        == 0
+    )
+    state = StateStore(git_repo.parent / "repo.runs").load()["TASK-001"]
+    assert state.finish_attempts[-1]["status"] == "merged"
+    assert state.finish_attempts[-1]["reused_task_commit"] is True
+    assert state.finish_attempts[-1]["review_snapshot_hash"] == state.review_snapshot_hash
+    assert state.finish_attempts[-1]["merge_commit_sha"] == run(["git", "rev-parse", "HEAD"], git_repo).stdout.strip()
+
+
 def test_finish_reports_merge_conflict(
     git_repo: Path,
     workerpool_config: Path,
@@ -795,3 +1496,10 @@ def test_finish_reports_merge_conflict(
     )
 
     assert code == 1
+
+
+def _python_acceptance(code: str) -> str:
+    escaped = code.replace('"', '\\"')
+    if os.name == "nt":
+        return f"& '{sys.executable}' -c \"{escaped}\""
+    return f"'{sys.executable}' -c \"{escaped}\""

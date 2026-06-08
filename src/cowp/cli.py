@@ -15,17 +15,24 @@ from cowp.config import (
     default_config_data,
     load_manifest,
     load_project_config,
+    paths_overlap,
     pool_root_for,
     validate_project,
     write_json,
 )
 from cowp.gitops import (
+    FinishError,
     GitError,
+    commit_range,
     create_worktree,
     finish_task,
+    head_sha,
+    is_concrete_sha,
+    merge_base_sha,
     task_branch,
     task_diff,
     task_diff_stat,
+    task_snapshot_hash,
     task_status,
     task_worktree,
 )
@@ -42,10 +49,13 @@ from cowp.planning import (
 )
 from cowp.runner import RunnerError, run_tasks
 from cowp.server import ServerError, serve_backlog
-from cowp.state import StateStore
+from cowp.state import StateStore, TaskState, now_iso
 
 START_SKIP_STATUSES = {"worktree_created", "running", "worker_succeeded", "merged"}
 RUN_SKIP_STATUSES = {"worker_succeeded", "merged"}
+FINDING_TYPES = {"bug", "design", "docs", "test", "boundary"}
+FINDING_STATUSES = {"open", "resolved", "invalid", "wontfix"}
+DISALLOWED_WONTFIX_SEVERITIES = {"P0", "P1"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -158,6 +168,41 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--task", required=True)
     review.add_argument("--log-tail", type=int, default=40)
     review.set_defaults(func=cmd_review)
+
+    finding = sub.add_parser("finding", help="manage execution review findings")
+    finding_sub = finding.add_subparsers(dest="finding_command", required=True)
+
+    finding_add = finding_sub.add_parser("add", help="record a review finding for a task")
+    add_repo_manifest(finding_add)
+    finding_add.add_argument("--task", required=True)
+    finding_add.add_argument("--type", required=True, choices=sorted(FINDING_TYPES))
+    finding_add.add_argument("--severity", default="P2")
+    finding_add.add_argument("--message", required=True)
+    finding_add.add_argument("--file", action="append", default=[])
+    finding_add.add_argument("--contract-change", action="store_true")
+    finding_add.set_defaults(func=cmd_finding_add)
+
+    finding_update = finding_sub.add_parser("update", help="update a review finding")
+    add_repo_manifest(finding_update)
+    finding_update.add_argument("--task", required=True)
+    finding_update.add_argument("--finding", required=True)
+    finding_update.add_argument("--type", choices=sorted(FINDING_TYPES))
+    finding_update.add_argument("--severity")
+    finding_update.add_argument("--message")
+    finding_update.add_argument("--status", choices=sorted(FINDING_STATUSES))
+    finding_update.add_argument("--resolution")
+    finding_update.add_argument("--contract-change", action="store_true")
+    finding_update.add_argument("--clear-contract-change", action="store_true")
+    finding_update.set_defaults(func=cmd_finding_update)
+
+    finding_resolve = finding_sub.add_parser("resolve", help="resolve a review finding with audit evidence")
+    add_repo_manifest(finding_resolve)
+    finding_resolve.add_argument("--task", required=True)
+    finding_resolve.add_argument("--finding", required=True)
+    finding_resolve.add_argument("--status", choices=["resolved", "invalid", "wontfix"], default="resolved")
+    finding_resolve.add_argument("--resolution", required=True)
+    finding_resolve.add_argument("--test-command")
+    finding_resolve.set_defaults(func=cmd_finding_resolve)
 
     finish = sub.add_parser("finish", help="commit and merge a reviewed task")
     add_repo_manifest(finish)
@@ -335,6 +380,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     tasks = selected_tasks(manifest, task_ids)
     for task in tasks:
         worktree = create_worktree(config, task, skip_clean_check=args.skip_clean_check)
+        base_sha = head_sha(worktree)
         store.update(
             task.id,
             status="worktree_created",
@@ -352,6 +398,14 @@ def cmd_start(args: argparse.Namespace) -> int:
             worker_acceptance_exit_code=None,
             main_acceptance_command=None,
             main_acceptance_exit_code=None,
+            task_review_findings=[],
+            review_snapshot_hash=None,
+            current_snapshot_hash=None,
+            task_branch_base_sha=base_sha,
+            finish_attempts=[],
+            superseded_reason=None,
+            superseded_at=None,
+            superseded_finding_ids=[],
         )
         print(f"{task.id}: {worktree}")
     return 0
@@ -397,30 +451,74 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"  git: {compact(task_status(worktree))}")
         if state and state.log_path:
             print(f"  log: {state.log_path}")
+        if state and state.review_snapshot_hash:
+            freshness = "fresh"
+            if state.current_snapshot_hash and state.current_snapshot_hash != state.review_snapshot_hash:
+                freshness = "stale"
+            print(f"  review: {freshness} snapshot={state.review_snapshot_hash}")
+        if state and state.task_review_findings:
+            blockers = review_finding_blockers(state.task_review_findings)
+            if blockers:
+                print("  review_blocked_by: " + "; ".join(blockers))
+            for finding in state.task_review_findings:
+                print(
+                    "  finding: "
+                    f"{finding.get('id')} "
+                    f"{finding.get('status', 'open')} "
+                    f"{finding.get('severity', 'P2')} "
+                    f"{finding.get('type', 'bug')} "
+                    f"{finding.get('message', '')}"
+                )
     return 0
 
 
 def cmd_review(args: argparse.Namespace) -> int:
     config, manifest = load_inputs(args)
     task = manifest.get_task(args.task)
+    store = StateStore(config.runs_root)
+    state = ensure_reviewable_branch(config, store, task.id)
     worktree = task_worktree(config, task.id)
     status = task_status(worktree)
     diff_stat = task_diff_stat(worktree)
     diff = task_diff(worktree)
+    snapshot_hash = task_snapshot_hash(worktree)
     review_dir = config.runs_root / task.id
     review_dir.mkdir(parents=True, exist_ok=True)
     status_path = review_dir / "review-status.txt"
     stat_path = review_dir / "review-diff-stat.txt"
     diff_path = review_dir / "review.diff"
+    preserve_snapshot = should_preserve_review_snapshot(state, status, diff)
+    if preserve_snapshot:
+        status_path = review_dir / "review-retry-status.txt"
+        stat_path = review_dir / "review-retry-diff-stat.txt"
     status_path.write_text(status or "<clean>\n", encoding="utf-8")
     stat_path.write_text(diff_stat or "<no diff>\n", encoding="utf-8")
-    diff_path.write_text(diff or "", encoding="utf-8")
-    StateStore(config.runs_root).update(
+    if not preserve_snapshot:
+        diff_path.write_text(diff or "", encoding="utf-8")
+    changes = {
+        "review_status": "generated",
+        "current_snapshot_hash": snapshot_hash,
+    }
+    if not preserve_snapshot:
+        changes["review_snapshot_hash"] = snapshot_hash
+        changes["review_diff_path"] = str(diff_path)
+    store.update(
         task.id,
-        review_status="generated",
-        review_diff_path=str(diff_path),
+        **changes,
+    )
+    store.append_audit_event(
+        task.id,
+        "review",
+        "review material generated",
+        snapshot_hash=snapshot_hash,
+        review_snapshot_preserved=preserve_snapshot,
+        review_diff_path=state.review_diff_path if preserve_snapshot else str(diff_path),
     )
     print(f"# {task.id} {task.title}")
+    if preserve_snapshot:
+        print("\n## recorded commit retry")
+        print("Task branch HEAD matches a recorded finish attempt; preserving previous review diff.")
+        print(f"review diff: {state.review_diff_path}")
     print("\n## git status")
     print(status or "<clean>")
     print("\n## diff stat")
@@ -435,27 +533,149 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_finding_add(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    manifest.get_task(args.task)
+    store = StateStore(config.runs_root)
+    state = get_or_create_task_state(store, args.task)
+    findings = list(state.task_review_findings or [])
+    finding = {
+        "id": next_finding_id(findings),
+        "type": args.type,
+        "severity": str(args.severity).upper(),
+        "status": "open",
+        "message": args.message,
+        "files": [str(item).replace("\\", "/") for item in args.file],
+        "contract_change": bool(args.contract_change),
+        "created_at": now_for_cli(),
+        "updated_at": now_for_cli(),
+    }
+    findings.append(finding)
+    store.update(args.task, task_review_findings=findings, review_status="blocked")
+    store.append_audit_event(args.task, "finding add", f"added {finding['id']}", finding=finding)
+    print(f"{args.task}: added {finding['id']}")
+    return 0
+
+
+def cmd_finding_update(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    manifest.get_task(args.task)
+    store = StateStore(config.runs_root)
+    state = get_or_create_task_state(store, args.task)
+    findings = list(state.task_review_findings or [])
+    finding = find_review_finding(findings, args.finding)
+    before = dict(finding)
+    if args.type:
+        finding["type"] = args.type
+    if args.severity:
+        finding["severity"] = str(args.severity).upper()
+    if args.message:
+        finding["message"] = args.message
+    if args.status:
+        if args.status in {"resolved", "invalid", "wontfix"} and not args.resolution:
+            raise ConfigError(f"{finding['id']}: --resolution is required when closing a finding")
+        finding["status"] = args.status
+    if args.resolution:
+        finding["resolution"] = args.resolution
+    if args.contract_change:
+        finding["contract_change"] = True
+    if args.clear_contract_change:
+        finding["contract_change"] = False
+    finding["updated_at"] = now_for_cli()
+    if finding.get("status") == "wontfix" and is_disallowed_wontfix(finding):
+        raise ConfigError(f"{finding['id']}: wontfix is not allowed for this finding")
+    store.update(args.task, task_review_findings=findings)
+    store.append_audit_event(
+        args.task,
+        "finding update",
+        f"updated {finding['id']}",
+        before=before,
+        after=finding,
+    )
+    print(f"{args.task}: updated {finding['id']}")
+    return 0
+
+
+def cmd_finding_resolve(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    manifest.get_task(args.task)
+    store = StateStore(config.runs_root)
+    state = get_or_create_task_state(store, args.task)
+    findings = list(state.task_review_findings or [])
+    finding = find_review_finding(findings, args.finding)
+    before = dict(finding)
+    finding["status"] = args.status
+    finding["resolution"] = args.resolution
+    finding["test_command"] = args.test_command
+    finding["resolved_at"] = now_for_cli()
+    finding["updated_at"] = now_for_cli()
+    if finding.get("status") == "wontfix" and is_disallowed_wontfix(finding):
+        raise ConfigError(f"{finding['id']}: wontfix is not allowed for this finding")
+    store.update(args.task, task_review_findings=findings)
+    store.append_audit_event(
+        args.task,
+        "finding resolve",
+        f"resolved {finding['id']} as {args.status}",
+        before=before,
+        after=finding,
+    )
+    print(f"{args.task}: {finding['id']} {args.status}")
+    return 0
+
+
 def cmd_finish(args: argparse.Namespace) -> int:
     config, manifest = load_inputs(args)
     task = manifest.get_task(args.task)
+    store = StateStore(config.runs_root)
+    state = get_or_create_task_state(store, task.id)
     acceptance = task.acceptance_command or config.acceptance.worker
     commit_message = args.commit_message or f"{task.id} {task.title}"
     merge_message = args.merge_message or f"Merge {task.id} {task.title}"
     run_dir = config.runs_root / task.id
     run_dir.mkdir(parents=True, exist_ok=True)
     final_diff_path = run_dir / "final-reviewed.diff"
-    final_diff_path.write_text(task_diff(task_worktree(config, task.id)) or "", encoding="utf-8")
-    finish_result = finish_task(
+    worktree = task_worktree(config, task.id)
+    reusable_task_commit = finish_gate(
         config=config,
+        store=store,
         task=task,
+        state=state,
         reviewed_files=args.reviewed_files,
-        commit_message=commit_message,
-        merge_message=merge_message,
-        acceptance_command=acceptance,
-        main_acceptance_command=config.acceptance.main,
-        keep_worktree=args.keep_worktree,
     )
-    StateStore(config.runs_root).update(
+    final_diff_path.write_text(task_diff(worktree) or "", encoding="utf-8")
+    try:
+        finish_result = finish_task(
+            config=config,
+            task=task,
+            reviewed_files=args.reviewed_files,
+            commit_message=commit_message,
+            merge_message=merge_message,
+            acceptance_command=acceptance,
+            main_acceptance_command=config.acceptance.main,
+            expected_snapshot_hash=state.review_snapshot_hash,
+            reusable_task_commit_sha=reusable_task_commit,
+            keep_worktree=args.keep_worktree,
+        )
+    except FinishError as exc:
+        latest = store.load().get(args.task) or state
+        attempts = list(latest.finish_attempts or [])
+        attempts.append(finish_attempt_from_result(latest, exc.finish_result, "failed", str(exc)))
+        store.update(
+            args.task,
+            finish_attempts=attempts,
+            worker_acceptance_command=acceptance,
+            worker_acceptance_exit_code=exc.finish_result.worker_acceptance_exit_code,
+            main_acceptance_command=config.acceptance.main,
+            main_acceptance_exit_code=exc.finish_result.main_acceptance_exit_code,
+        )
+        raise
+    except GitError as exc:
+        store.append_audit_event(args.task, "finish", "finish rejected before task commit", error=str(exc))
+        raise
+    latest = store.load().get(args.task) or state
+    attempts = list(latest.finish_attempts or [])
+    attempts.append(finish_attempt_from_result(latest, finish_result, "merged", None))
+    store.update(
         args.task,
         status="merged",
         exit_code=0,
@@ -466,6 +686,7 @@ def cmd_finish(args: argparse.Namespace) -> int:
         worker_acceptance_exit_code=finish_result.worker_acceptance_exit_code,
         main_acceptance_command=config.acceptance.main,
         main_acceptance_exit_code=finish_result.main_acceptance_exit_code,
+        finish_attempts=attempts,
     )
     print(f"{args.task}: merged")
     return 0
@@ -499,6 +720,325 @@ def validation_scope_plans(config: ProjectConfig, args: argparse.Namespace):
 
 def selected_tasks(manifest: Manifest, task_ids) -> list:
     return [manifest.get_task(task_id) for task_id in task_ids]
+
+
+def get_or_create_task_state(store: StateStore, task_id: str) -> TaskState:
+    state = store.load().get(task_id)
+    if state:
+        return state
+    return store.update(task_id, status="planned")
+
+
+def ensure_reviewable_branch(config: ProjectConfig, store: StateStore, task_id: str) -> TaskState:
+    state = get_or_create_task_state(store, task_id)
+    worktree = task_worktree(config, task_id)
+    current_head = head_sha(worktree)
+    base_sha = state.task_branch_base_sha
+    if not base_sha:
+        merge_base = merge_base_sha(config, config.base_branch, current_head)
+        if current_head != merge_base:
+            store.append_audit_event(
+                task_id,
+                "review",
+                "refused old task branch with commits before base sha initialization",
+                task_head=current_head,
+                merge_base=merge_base,
+            )
+            raise GitError(
+                f"{task_id}: task_branch_base_sha is missing and task branch is already ahead of merge-base"
+            )
+        state = store.update(task_id, task_branch_base_sha=current_head)
+        store.append_audit_event(
+            task_id,
+            "review",
+            "initialized missing task_branch_base_sha",
+            task_branch_base_sha=current_head,
+        )
+        return state
+
+    latest_commit = latest_recorded_task_commit(state)
+    if latest_commit:
+        if current_head != latest_commit:
+            store.append_audit_event(
+                task_id,
+                "review",
+                "refused unauthorized task branch commit after finish attempt",
+                task_head=current_head,
+                latest_recorded_task_commit=latest_commit,
+            )
+            raise GitError(f"{task_id}: task branch HEAD is not the latest reviewed task commit")
+        return state
+
+    if current_head != base_sha:
+        store.append_audit_event(
+            task_id,
+            "review",
+            "refused unauthorized task branch commit before review",
+            task_head=current_head,
+            task_branch_base_sha=base_sha,
+        )
+        raise GitError(f"{task_id}: task branch contains commits before finish; workers must not commit")
+    return state
+
+
+def finish_gate(
+    *,
+    config: ProjectConfig,
+    store: StateStore,
+    task,
+    state: TaskState,
+    reviewed_files: list[str],
+) -> str | None:
+    if state.status in {"superseded", "withdrawn"}:
+        store.append_audit_event(task.id, "finish", "refused terminal non-mergeable task", status=state.status)
+        raise GitError(f"{task.id}: task status is non-mergeable: {state.status}")
+    if not state.review_diff_path or not Path(state.review_diff_path).is_file():
+        store.append_audit_event(task.id, "finish", "refused finish without review material")
+        raise GitError(f"{task.id}: no review material; run cowp review first")
+    if not state.review_snapshot_hash:
+        store.append_audit_event(task.id, "finish", "refused finish without review snapshot hash")
+        raise GitError(f"{task.id}: review snapshot hash is missing; run cowp review first")
+
+    blockers = review_finding_blockers(state.task_review_findings or [])
+    if blockers:
+        store.append_audit_event(task.id, "finish", "refused finish with review blockers", blockers=blockers)
+        raise GitError(f"{task.id}: review blockers remain: {'; '.join(blockers)}")
+
+    outside_review = [path for path in reviewed_files if not reviewed_path_allowed(path, task.allowed_files)]
+    if outside_review:
+        store.append_audit_event(task.id, "finish", "refused reviewed file outside allowed_files", files=outside_review)
+        raise GitError(f"{task.id}: reviewed files outside allowed_files: {', '.join(outside_review)}")
+    directory_review = [path for path in reviewed_files if reviewed_path_is_directory(config, task.id, path)]
+    if directory_review:
+        store.append_audit_event(task.id, "finish", "refused directory reviewed path", files=directory_review)
+        raise GitError(f"{task.id}: reviewed files must be file paths, not directories: {', '.join(directory_review)}")
+
+    state = ensure_finish_branch_gate(config, store, task.id)
+    reusable = reusable_finish_task_commit(config, task.id, state)
+    if reusable:
+        return reusable
+
+    current_hash = task_snapshot_hash(task_worktree(config, task.id))
+    if current_hash != state.review_snapshot_hash:
+        store.update(task.id, current_snapshot_hash=current_hash)
+        store.append_audit_event(
+            task.id,
+            "finish",
+            "refused stale review snapshot",
+            review_snapshot_hash=state.review_snapshot_hash,
+            current_snapshot_hash=current_hash,
+        )
+        raise GitError(f"{task.id}: review snapshot is stale; run cowp review again")
+    return None
+
+
+def ensure_finish_branch_gate(config: ProjectConfig, store: StateStore, task_id: str) -> TaskState:
+    state = get_or_create_task_state(store, task_id)
+    if not state.task_branch_base_sha:
+        store.append_audit_event(task_id, "finish", "refused finish without task_branch_base_sha")
+        raise GitError(f"{task_id}: task_branch_base_sha is missing; run cowp review first")
+    current_head = head_sha(task_worktree(config, task_id))
+    latest_commit = latest_recorded_task_commit(state)
+    if latest_commit:
+        if current_head != latest_commit:
+            store.append_audit_event(
+                task_id,
+                "finish",
+                "refused unauthorized task branch commit after finish attempt",
+                task_head=current_head,
+                latest_recorded_task_commit=latest_commit,
+            )
+            raise GitError(f"{task_id}: task branch HEAD is not the latest reviewed task commit")
+        return state
+    if current_head != state.task_branch_base_sha:
+        store.append_audit_event(
+            task_id,
+            "finish",
+            "refused unauthorized task branch commit before finish",
+            task_head=current_head,
+            task_branch_base_sha=state.task_branch_base_sha,
+        )
+        raise GitError(f"{task_id}: task branch contains commits before finish; workers must not commit")
+    return state
+
+
+def should_preserve_review_snapshot(state: TaskState, status: str, diff: str) -> bool:
+    return bool(
+        state.review_snapshot_hash
+        and state.review_diff_path
+        and Path(state.review_diff_path).is_file()
+        and latest_recorded_task_commit(state)
+        and not status.strip()
+        and not diff.strip()
+    )
+
+
+def review_finding_blockers(findings: list[dict]) -> list[str]:
+    blockers: list[str] = []
+    for finding in findings:
+        finding_id = str(finding.get("id") or "<finding>")
+        status = str(finding.get("status") or "open")
+        if status == "open":
+            blockers.append(f"{finding_id} open")
+        if status == "wontfix" and is_disallowed_wontfix(finding):
+            blockers.append(f"{finding_id} disallowed wontfix")
+        if status != "invalid" and str(finding.get("type") or "") == "boundary":
+            blockers.append(f"{finding_id} active boundary")
+        if status != "invalid" and bool(finding.get("contract_change", False)):
+            blockers.append(f"{finding_id} active contract_change")
+    return blockers
+
+
+def reviewed_path_allowed(path: str, allowed_files: tuple[str, ...]) -> bool:
+    reviewed = normalize_review_path(path)
+    if not reviewed:
+        return False
+    return any(
+        reviewed == allowed or reviewed.startswith(allowed + "/")
+        for allowed in (normalize_review_path(item) for item in allowed_files)
+        if allowed
+    )
+
+
+def normalize_review_path(path: str) -> str:
+    raw = str(path).replace("\\", "/").strip()
+    if not raw or Path(raw).is_absolute() or raw.startswith("/"):
+        return ""
+    if any(char in raw for char in "*?[]:"):
+        return ""
+    parts = [part for part in raw.strip("/").split("/") if part]
+    if any(part in {".", ".."} for part in parts):
+        return ""
+    return "/".join(parts).lower()
+
+
+def reviewed_path_is_directory(config: ProjectConfig, task_id: str, path: str) -> bool:
+    normalized = normalize_review_path(path)
+    return bool(normalized and (task_worktree(config, task_id) / normalized).is_dir())
+
+
+def is_disallowed_wontfix(finding: dict) -> bool:
+    severity = str(finding.get("severity") or "").upper()
+    return (
+        severity in DISALLOWED_WONTFIX_SEVERITIES
+        or str(finding.get("type") or "") == "boundary"
+        or bool(finding.get("contract_change", False))
+    )
+
+
+def next_finding_id(findings: list[dict]) -> str:
+    seen = []
+    for finding in findings:
+        raw = str(finding.get("id") or "")
+        if raw.startswith("RF-") and raw[3:].isdigit():
+            seen.append(int(raw[3:]))
+    return f"RF-{(max(seen) if seen else 0) + 1:03d}"
+
+
+def find_review_finding(findings: list[dict], finding_id: str) -> dict:
+    for finding in findings:
+        if finding.get("id") == finding_id:
+            return finding
+    raise ConfigError(f"review finding not found: {finding_id}")
+
+
+def latest_recorded_task_commit(state: TaskState) -> str | None:
+    for attempt in reversed(state.finish_attempts or []):
+        commit = attempt.get("task_commit_sha")
+        if isinstance(commit, str) and commit:
+            return commit
+    return None
+
+
+def latest_recorded_attempt_with_commit(state: TaskState) -> dict | None:
+    for attempt in reversed(state.finish_attempts or []):
+        if attempt.get("task_commit_sha"):
+            return attempt
+    return None
+
+
+def reusable_finish_task_commit(config: ProjectConfig, task_id: str, state: TaskState) -> str | None:
+    attempt = latest_recorded_attempt_with_commit(state)
+    if not attempt or attempt.get("status") != "failed":
+        return None
+    worktree = task_worktree(config, task_id)
+    if task_status(worktree).strip():
+        return None
+    task_commit = str(attempt.get("task_commit_sha") or "")
+    if head_sha(worktree) != task_commit:
+        raise GitError(f"{task_id}: task branch HEAD no longer matches recorded finish attempt")
+    validate_finish_attempt_coverage(config, task_id, attempt, state.review_snapshot_hash)
+    return task_commit
+
+
+def validate_finish_attempt_coverage(
+    config: ProjectConfig,
+    task_id: str,
+    attempt: dict,
+    expected_review_snapshot_hash: str | None,
+) -> None:
+    base_sha = str(attempt.get("base_commit_sha") or "")
+    task_commit = str(attempt.get("task_commit_sha") or "")
+    review_snapshot_hash = str(attempt.get("review_snapshot_hash") or "")
+    covered = attempt.get("covered_commit_range")
+    if not is_snapshot_hash(review_snapshot_hash):
+        raise GitError(f"{task_id}: finish attempt review_snapshot_hash is invalid")
+    if expected_review_snapshot_hash and review_snapshot_hash != expected_review_snapshot_hash:
+        raise GitError(f"{task_id}: finish attempt review_snapshot_hash does not match current review")
+    if not is_concrete_sha(base_sha) or not is_concrete_sha(task_commit):
+        raise GitError(f"{task_id}: finish attempt coverage is missing concrete SHAs")
+    if not isinstance(covered, list) or not covered or not all(is_concrete_sha(str(item)) for item in covered):
+        raise GitError(f"{task_id}: finish attempt covered_commit_range is invalid")
+    if str(covered[-1]) != task_commit:
+        raise GitError(f"{task_id}: finish attempt covered_commit_range does not end at task commit")
+    current_merge_base = merge_base_sha(config, config.base_branch, task_commit)
+    if current_merge_base != base_sha:
+        raise GitError(f"{task_id}: base branch merge-base no longer matches recorded finish attempt")
+    actual = commit_range(config, base_sha, task_commit)
+    if tuple(str(item) for item in covered) != actual:
+        raise GitError(f"{task_id}: task commit range is not fully review-covered")
+
+
+def is_snapshot_hash(value: str) -> bool:
+    return len(value) == 64 and all(char in "0123456789abcdefABCDEF" for char in value)
+
+
+def finish_attempt_from_result(
+    state: TaskState,
+    result,
+    status: str,
+    error: str | None,
+) -> dict:
+    attempt = {
+        "id": next_finish_attempt_id(state.finish_attempts or []),
+        "status": status,
+        "finished_at": now_iso(),
+        "base_commit_sha": result.base_commit_sha,
+        "parent_task_commit_sha": result.parent_task_commit_sha,
+        "task_commit_sha": result.task_commit_sha,
+        "covered_commit_range": list(result.covered_commit_range),
+        "review_snapshot_hash": result.review_snapshot_hash,
+        "merge_commit_sha": result.merge_commit_sha,
+        "worker_acceptance_exit_code": result.worker_acceptance_exit_code,
+        "main_acceptance_exit_code": result.main_acceptance_exit_code,
+        "reused_task_commit": result.reused_task_commit,
+    }
+    if error:
+        attempt["error"] = error
+    return attempt
+
+
+def next_finish_attempt_id(attempts: list[dict]) -> str:
+    seen = []
+    for attempt in attempts:
+        raw = str(attempt.get("id") or "")
+        if raw.startswith("FA-") and raw[3:].isdigit():
+            seen.append(int(raw[3:]))
+    return f"FA-{(max(seen) if seen else 0) + 1:03d}"
+
+
+def now_for_cli() -> str:
+    return now_iso()
 
 
 def print_validation(result) -> None:

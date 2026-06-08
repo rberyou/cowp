@@ -68,6 +68,8 @@ Review and finish one task at a time:
 
 ```powershell
 cowp review --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001
+cowp finding add --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001 --type bug --severity P2 --message "short finding"
+cowp finding resolve --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001 --finding RF-001 --resolution "fixed and retested"
 cowp finish --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001 --reviewed-files src/example.py tests/test_example.py
 ```
 
@@ -87,7 +89,7 @@ cowp finish --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpo
   task worktree path already exists. Choose a fresh task id or explicitly clean
   up the old branch/worktree before export.
 - `cowp backlog status` prints a Kanban-style overview with derived `Clarify`,
-  running, failed, review-needed, blocked, and merged columns.
+  running, failed, review-needed, review-blocked, blocked, and merged columns.
 - `cowp backlog serve` starts a local read-only dashboard at
   `http://127.0.0.1:8765` by default. It uses stdlib `http.server`, serves only
   loopback hosts, and polls the same structured backlog snapshot as the text
@@ -112,10 +114,20 @@ cowp finish --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpo
 - `run` treats a zero-exit worker with no file changes as failure, so a
   conversational answer cannot pass as completed implementation.
 - `review` writes `runs_root/TASK-NNN/review.diff` so Codex review material is
-  reproducible, including untracked new files.
-- `finish` only stages reviewed files and refuses unreviewed changes.
-- `finish` records reviewed files, final diff snapshot, and acceptance command
-  results in `runs_root/state.json`.
+  reproducible, including untracked new files. It also records a review snapshot
+  hash used by `finish`.
+- `cowp finding add/update/resolve` records execution review findings in
+  `runs_root/state.json`. Open findings block `finish`; boundary and
+  `contract_change` findings remain non-mergeable until reclassified or marked
+  invalid with audit evidence.
+- `finish` requires review material, refuses stale review snapshots, stages only
+  reviewed files, refuses unreviewed changes, and rejects worker/manual commits
+  made before the controlled finish step.
+- `finish` runs the controller acceptance inside a `git merge --no-ff
+  --no-commit` transaction and creates the merge commit only after acceptance
+  passes.
+- `finish` records reviewed files, final diff snapshot, acceptance command
+  results, and finish attempts in `runs_root/state.json`.
 - Worker merge is intentionally serial and controlled by Codex.
 
 ## Local Workflow Refresh
