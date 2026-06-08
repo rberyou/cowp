@@ -1285,6 +1285,14 @@ def link_plan_replacement(
     data = _plan_data(plan)
     original = _raw_task(data, task_id)
     replacement = _raw_task(data, replacement_id)
+    states = StateStore(config.runs_root).load()
+    original_state = states.get(task_id)
+    if not original_state or original_state.status != "superseded":
+        status = original_state.status if original_state else "planned"
+        raise ConfigError(f"{task_id}: replacement link requires execution status superseded, got {status}")
+    replacement_state = states.get(replacement_id)
+    if replacement_state and replacement_state.status in {"superseded", "withdrawn"}:
+        raise ConfigError(f"{replacement_id}: replacement target execution status is {replacement_state.status}")
     if original.get("status") == "withdrawn" or replacement.get("status") == "withdrawn":
         raise ConfigError("withdrawn tasks cannot participate in supersede replacement links")
     if replacement.get("replaces") not in (None, "", task_id):
@@ -1320,13 +1328,17 @@ def withdraw_plan_task(
         raise ConfigError(f"{task_id}: only exported tasks can be withdrawn")
     if not replacements:
         raise ConfigError(f"{task_id}: at least one replacement task is required")
+    states = StateStore(config.runs_root).load()
     for replacement_id in replacements:
         replacement = _raw_task(data, replacement_id)
         if replacement.get("status") == "withdrawn":
             raise ConfigError(f"{task_id}: replacement {replacement_id} is withdrawn")
+        replacement_state = states.get(replacement_id)
+        if replacement_state and replacement_state.status in {"superseded", "withdrawn"}:
+            raise ConfigError(f"{task_id}: replacement {replacement_id} execution status is {replacement_state.status}")
         if task_id in (replacement.get("depends_on") or []):
             raise ConfigError(f"{task_id}: replacement {replacement_id} depends on withdrawn task")
-    state = StateStore(config.runs_root).load().get(task_id)
+    state = states.get(task_id)
     if state and state.status not in {"planned", "worktree_created"}:
         raise ConfigError(f"{task_id}: cannot withdraw after execution status {state.status}")
     raw["status"] = "withdrawn"

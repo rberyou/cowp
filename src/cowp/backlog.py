@@ -39,6 +39,7 @@ class BacklogTask:
     execution_status: str
     superseded_by: str | None
     replacement_contract: str | None
+    replacement_chain: tuple[str, ...]
     replaces: str | None
     superseded_reason: str | None
     withdrawn_reason: str | None
@@ -235,6 +236,8 @@ def _task_snapshot(
     execution_blockers = tuple(_task_execution_blockers(state))
     review_blockers = tuple(_task_review_blockers(state))
     combined_blockers = tuple([*blockers, *execution_blockers, *review_blockers])
+    replacement_chain = queries.replacement_chain(task.id)
+    visible_replacement_chain = replacement_chain if len(replacement_chain) > 1 else ()
     column = backlog_column_for_task(plan, task, state, combined_blockers)
     return BacklogTask(
         task_id=task.id,
@@ -250,6 +253,7 @@ def _task_snapshot(
         execution_status=state.status if state else "planned",
         superseded_by=task.superseded_by,
         replacement_contract=task.replacement_contract if task.superseded_by else None,
+        replacement_chain=visible_replacement_chain,
         replaces=task.replaces,
         superseded_reason=state.superseded_reason if state else None,
         withdrawn_reason=task.withdrawn_reason,
@@ -339,6 +343,7 @@ def _unassigned_manifest_tasks(
                 execution_status=state.status if state else "planned",
                 superseded_by=None,
                 replacement_contract=None,
+                replacement_chain=(),
                 replaces=None,
                 superseded_reason=state.superseded_reason if state else None,
                 withdrawn_reason=_optional_str(raw.get("withdrawn_reason")),
@@ -384,6 +389,8 @@ def _feature_lines(feature: BacklogFeature) -> list[str]:
             lines.append("      effective_depends_on: " + ", ".join(task.effective_depends_on))
         if task.superseded_by:
             lines.append(f"      superseded_by: {task.superseded_by} contract={task.replacement_contract}")
+        if task.replacement_chain:
+            lines.append("      replacement_chain: " + " -> ".join(task.replacement_chain))
         if task.replaces:
             lines.append(f"      replaces: {task.replaces}")
         if task.withdrawn_reason:
@@ -477,6 +484,7 @@ def _task_blockers(
     if task.status in {"ready", "exported", "blocked"}:
         blockers.extend(queries.feature_dependency_blockers(plan, all_plans))
         blockers.extend(_task_dependency_blockers(plan, task, queries))
+    blockers.extend(queries.consistency_blockers(task.id))
     return blockers
 
 
@@ -521,6 +529,7 @@ def _task_to_dict(task: BacklogTask) -> dict[str, Any]:
         "execution_status": task.execution_status,
         "superseded_by": task.superseded_by,
         "replacement_contract": task.replacement_contract,
+        "replacement_chain": list(task.replacement_chain),
         "replaces": task.replaces,
         "superseded_reason": task.superseded_reason,
         "withdrawn_reason": task.withdrawn_reason,

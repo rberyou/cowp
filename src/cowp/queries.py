@@ -11,6 +11,7 @@ from cowp.state import StateStore, TaskState
 DEPENDENCY_SATISFIED_STATUS = "merged"
 REVIEW_NEEDED_STATUS = "worker_succeeded"
 TERMINAL_NON_MERGEABLE_STATUSES = {"superseded", "withdrawn"}
+NON_RUNNABLE_STATUSES = {"worker_succeeded", "merged", "superseded", "withdrawn"}
 
 
 @dataclass(frozen=True)
@@ -124,10 +125,14 @@ class WorkflowQueries:
 
     def run_blockers(self, task: Any, known_task_ids: set[str] | None = None) -> list[str]:
         blockers: list[str] = []
+        state = self.states.get(task.id)
+        if state and state.status in NON_RUNNABLE_STATUSES:
+            blockers.append(f"task execution status is {state.status}")
         if not manifest_task_active(task):
             blockers.append("manifest task is inactive")
         if manifest_task_withdrawn(task):
             blockers.append("manifest task is withdrawn")
+        blockers.extend(self.consistency_blockers(task.id))
         blockers.extend(self.dependency_blockers(task, known_task_ids=known_task_ids))
         return blockers
 
@@ -216,9 +221,13 @@ class WorkflowQueries:
                 return ReplacementResolution(task_id, current, tuple(edges), tuple(blockers))
             contract = str(getattr(task, "replacement_contract", None) or "unknown")
             edges.append(ReplacementEdge(current, replacement, contract))
-            if state and state.status not in {"superseded"}:
+            if state is None:
                 blockers.append(
-                    f"{current} replacement points to {replacement} but execution status is {state.status}"
+                    f"consistency: {current} replacement points to {replacement} but execution status is planned"
+                )
+            elif state.status != "superseded":
+                blockers.append(
+                    f"consistency: {current} replacement points to {replacement} but execution status is {state.status}"
                 )
             if contract != "compatible":
                 blockers.append(f"replacement contract {current}->{replacement} is {contract}")
@@ -253,10 +262,10 @@ class WorkflowQueries:
         state = self.states.get(task_id)
         if task and getattr(task, "superseded_by", None) and state and state.status != "superseded":
             blockers.append(
-                f"{task_id} has replacement metadata but execution status is {state.status}"
+                f"consistency: {task_id} has replacement metadata but execution status is {state.status}"
             )
-        if state and state.status == "superseded" and task and not getattr(task, "superseded_by", None):
-            blockers.append(f"{task_id} is superseded without linked replacement")
+        if task and getattr(task, "superseded_by", None) and state is None:
+            blockers.append(f"consistency: {task_id} has replacement metadata but execution status is planned")
         return blockers
 
 

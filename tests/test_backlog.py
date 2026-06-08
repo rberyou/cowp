@@ -311,10 +311,72 @@ def test_snapshot_shows_replacement_and_withdrawal_details(
     withdrawn = next(task for task in blocked["tasks"] if task["task_id"] == "TASK-003")
     assert old_task["superseded_by"] == "TASK-002"
     assert old_task["replacement_contract"] == "compatible"
+    assert old_task["replacement_chain"] == ["TASK-001", "TASK-002"]
     assert "task is superseded: Boundary changed" in old_task["blockers"]
     assert withdrawn["withdrawn_reason"] == "Split before run"
     assert withdrawn["withdrawn_replacement_tasks"] == ["TASK-002"]
     assert "task is withdrawn: Split before run" in withdrawn["blockers"]
+
+
+def test_snapshot_shows_replacement_consistency_blocker(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "consistency visibility",
+            "status": "exported",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "old",
+                    "status": "exported",
+                    "superseded_by": "TASK-002",
+                    "replacement_contract": "compatible",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+                {
+                    "id": "TASK-002",
+                    "title": "replacement",
+                    "status": "ready",
+                    "replaces": "TASK-001",
+                    "allowed_files": ["tests/test_example.py"],
+                    "prompt": "WRITE tests/test_example.py",
+                },
+                {
+                    "id": "TASK-003",
+                    "title": "downstream",
+                    "status": "ready",
+                    "depends_on": ["TASK-001"],
+                    "allowed_files": ["README.md"],
+                    "prompt": "WRITE README.md",
+                },
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    StateStore(config.runs_root).update("TASK-001", status="worker_succeeded")
+
+    data = backlog_snapshot_to_dict(build_backlog_snapshot(config))
+
+    feature = _feature(_column(data, "Needs Codex Review"), "FEATURE-001")
+    task = feature["tasks"][0]
+    assert task["replacement_chain"] == ["TASK-001", "TASK-002"]
+    assert "consistency: TASK-001 has replacement metadata but execution status is worker_succeeded" in task["blockers"]
+    blocked_feature = _feature(_column(data, "Blocked"), "FEATURE-001")
+    downstream = next(task for task in blocked_feature["tasks"] if task["task_id"] == "TASK-003")
+    assert (
+        "consistency: TASK-001 replacement points to TASK-002 but execution status is worker_succeeded"
+        in downstream["blockers"]
+    )
 
 
 def test_backlog_status_lines_render_from_snapshot(git_repo: Path, workerpool_config: Path):

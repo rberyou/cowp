@@ -1088,6 +1088,118 @@ def test_compatible_replacement_chain_controls_downstream_readiness(
     assert "TASK-003 runnable" in output
 
 
+def test_link_replacement_requires_superseded_execution_state(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    path = _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "replacement state gate",
+            "status": "exported",
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "old",
+                    "status": "exported",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+                {
+                    "id": "TASK-002",
+                    "title": "replacement",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+            ],
+        },
+    )
+    args = [
+        "plan",
+        "link-replacement",
+        "--repo",
+        str(git_repo),
+        "--plan",
+        str(path),
+        "--task",
+        "TASK-001",
+        "--replacement",
+        "TASK-002",
+        "--contract",
+        "compatible",
+    ]
+    assert main(args) == 1
+
+    config = load_project_config(git_repo)
+    StateStore(config.runs_root).update("TASK-001", status="worker_succeeded")
+    assert main(args) == 1
+
+    StateStore(config.runs_root).update("TASK-001", status="superseded")
+    assert main(args) == 0
+
+
+def test_link_replacement_rejects_superseded_replacement_target(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    path = _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "replacement target gate",
+            "status": "exported",
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "old",
+                    "status": "exported",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+                {
+                    "id": "TASK-002",
+                    "title": "replacement",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    store = StateStore(config.runs_root)
+    store.update("TASK-001", status="superseded")
+    store.update("TASK-002", status="superseded")
+
+    assert (
+        main(
+            [
+                "plan",
+                "link-replacement",
+                "--repo",
+                str(git_repo),
+                "--plan",
+                str(path),
+                "--task",
+                "TASK-001",
+                "--replacement",
+                "TASK-002",
+                "--contract",
+                "compatible",
+            ]
+        )
+        == 1
+    )
+
+
 def test_exported_downstream_is_stale_until_force_reexport_after_replacement(
     git_repo: Path,
     workerpool_config: Path,
@@ -1284,6 +1396,122 @@ def test_withdraw_task_marks_exported_manifest_entry_inactive(
         )
         == 1
     )
+
+
+def test_withdraw_task_rejects_superseded_replacement_execution_state(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    path = _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "withdraw replacement gate",
+            "status": "exported",
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "old task",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+                {
+                    "id": "TASK-002",
+                    "title": "replacement task",
+                    "status": "ready",
+                    "allowed_files": ["tests/test_example.py"],
+                    "prompt": "WRITE tests/test_example.py",
+                },
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    assert export_ready_tasks(config, load_plan(git_repo, path), ".codex-workerpool/tasks.json", task_id="TASK-001") == ["TASK-001"]
+    StateStore(config.runs_root).update("TASK-002", status="superseded")
+
+    assert (
+        main(
+            [
+                "plan",
+                "withdraw-task",
+                "--repo",
+                str(git_repo),
+                "--plan",
+                str(path),
+                "--manifest",
+                ".codex-workerpool/tasks.json",
+                "--task",
+                "TASK-001",
+                "--replacement",
+                "TASK-002",
+                "--reason",
+                "Split before worker execution",
+            ]
+        )
+        == 1
+    )
+
+
+def test_validate_errors_on_replacement_state_consistency_blocker(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+    capsys,
+):
+    _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "consistency",
+            "status": "exported",
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "old",
+                    "status": "exported",
+                    "superseded_by": "TASK-002",
+                    "replacement_contract": "compatible",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+                {
+                    "id": "TASK-002",
+                    "title": "replacement",
+                    "status": "ready",
+                    "replaces": "TASK-001",
+                    "allowed_files": ["tests/test_example.py"],
+                    "prompt": "WRITE tests/test_example.py",
+                },
+            ],
+        },
+    )
+    prompt = git_repo / ".codex-workerpool" / "tasks" / "TASK-001.md"
+    prompt.parent.mkdir(parents=True, exist_ok=True)
+    prompt.write_text("WRITE src/example.py\n", encoding="utf-8")
+    write_json(
+        git_repo / ".codex-workerpool" / "tasks.json",
+        {
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "old",
+                    "worker": "default",
+                    "prompt_file": "tasks/TASK-001.md",
+                    "allowed_files": ["src/example.py"],
+                }
+            ]
+        },
+    )
+
+    assert main(["validate", "--repo", str(git_repo), "--manifest", ".codex-workerpool/tasks.json"]) == 1
+    assert "consistency: TASK-001 has replacement metadata" in capsys.readouterr().err
 
 
 def _write_plan(repo: Path, data: dict) -> Path:

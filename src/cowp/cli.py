@@ -75,6 +75,7 @@ RUN_SKIP_STATUSES = {"worker_succeeded", "merged", "superseded", "withdrawn"}
 FINDING_TYPES = {"bug", "design", "docs", "test", "boundary"}
 FINDING_STATUSES = {"open", "resolved", "invalid", "wontfix"}
 DISALLOWED_WONTFIX_SEVERITIES = {"P0", "P1"}
+REVIEW_MUTATION_STATUSES = {"worker_succeeded", "worker_failed"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -785,7 +786,7 @@ def cmd_finding_add(args: argparse.Namespace) -> int:
     config, manifest = load_inputs(args)
     manifest.get_task(args.task)
     store = StateStore(config.runs_root)
-    state = get_or_create_task_state(store, args.task)
+    state = ensure_review_mutation_allowed(store, args.task, "finding add")
     findings = list(state.task_review_findings or [])
     finding = {
         "id": next_finding_id(findings),
@@ -809,7 +810,7 @@ def cmd_finding_update(args: argparse.Namespace) -> int:
     config, manifest = load_inputs(args)
     manifest.get_task(args.task)
     store = StateStore(config.runs_root)
-    state = get_or_create_task_state(store, args.task)
+    state = ensure_review_mutation_allowed(store, args.task, "finding update")
     findings = list(state.task_review_findings or [])
     finding = find_review_finding(findings, args.finding)
     before = dict(finding)
@@ -848,7 +849,7 @@ def cmd_finding_resolve(args: argparse.Namespace) -> int:
     config, manifest = load_inputs(args)
     manifest.get_task(args.task)
     store = StateStore(config.runs_root)
-    state = get_or_create_task_state(store, args.task)
+    state = ensure_review_mutation_allowed(store, args.task, "finding resolve")
     findings = list(state.task_review_findings or [])
     finding = find_review_finding(findings, args.finding)
     before = dict(finding)
@@ -875,9 +876,15 @@ def cmd_supersede_task(args: argparse.Namespace) -> int:
     config, manifest = load_inputs(args)
     manifest.get_task(args.task)
     store = StateStore(config.runs_root)
-    state = get_or_create_task_state(store, args.task)
-    if state.status in {"planned", "worktree_created", "running", "merged", "superseded"}:
-        raise ConfigError(f"{args.task}: cannot supersede execution status {state.status}")
+    state = store.load().get(args.task)
+    if state and state.status == "superseded":
+        existing_findings = sorted(state.superseded_finding_ids or [])
+        requested_findings = sorted(args.finding or [])
+        if state.superseded_reason == args.reason and existing_findings == requested_findings:
+            print(f"{args.task}: superseded")
+            return 0
+        raise ConfigError(f"{args.task}: already superseded with different reason or findings")
+    state = ensure_review_mutation_allowed(store, args.task, "supersede-task")
     findings = list(state.task_review_findings or [])
     selected = [find_review_finding(findings, finding_id) for finding_id in args.finding]
     active_boundary = [
@@ -1001,6 +1008,7 @@ def extend_manifest_workflow_validation(config: ProjectConfig, manifest: Manifes
                 "dependency metadata is stale" in blocker
                 or blocker.startswith("manifest task is ")
                 or blocker.startswith("unknown dependency")
+                or blocker.startswith("consistency:")
             ):
                 result.errors.append(text)
             else:
@@ -1051,6 +1059,15 @@ def get_or_create_task_state(store: StateStore, task_id: str) -> TaskState:
     if state:
         return state
     return store.update(task_id, status="planned")
+
+
+def ensure_review_mutation_allowed(store: StateStore, task_id: str, command: str) -> TaskState:
+    state = store.load().get(task_id)
+    status = state.status if state else "planned"
+    if status not in REVIEW_MUTATION_STATUSES:
+        raise ConfigError(f"{task_id}: {command} requires worker_succeeded or worker_failed, got {status}")
+    assert state is not None
+    return state
 
 
 def ensure_reviewable_branch(config: ProjectConfig, store: StateStore, task_id: str) -> TaskState:

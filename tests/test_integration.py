@@ -606,6 +606,7 @@ def test_supersede_task_marks_execution_terminal_and_finish_refuses(
     git_repo: Path,
     workerpool_config: Path,
     fake_opencode: Path,
+    capsys,
 ):
     manifest = write_manifest(
         git_repo,
@@ -669,6 +670,73 @@ def test_supersede_task_marks_execution_terminal_and_finish_refuses(
     assert (
         main(
             [
+                "supersede-task",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--finding",
+                "RF-001",
+                "--reason",
+                "Boundary cannot be fixed inside allowed files",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "finding",
+                "add",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--type",
+                "bug",
+                "--message",
+                "should be rejected",
+            ]
+        )
+        == 1
+    )
+    assert (
+        main(
+            [
+                "start",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+            ]
+        )
+        == 1
+    )
+    assert "TASK-001: task is not startable: task execution status is superseded" in capsys.readouterr().err
+    assert (
+        main(
+            [
+                "run",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+            ]
+        )
+        == 1
+    )
+    assert "TASK-001: task is not runnable: task execution status is superseded" in capsys.readouterr().err
+    assert (
+        main(
+            [
                 "finish",
                 "--repo",
                 str(git_repo),
@@ -682,6 +750,46 @@ def test_supersede_task_marks_execution_terminal_and_finish_refuses(
         )
         == 1
     )
+
+
+def test_review_mutations_reject_non_reviewable_execution_states(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "not reviewable",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    store = StateStore(git_repo.parent / "repo.runs")
+    for status in ("running", "merged"):
+        store.update("TASK-001", status=status)
+        assert (
+            main(
+                [
+                    "finding",
+                    "add",
+                    "--repo",
+                    str(git_repo),
+                    "--manifest",
+                    str(manifest),
+                    "--task",
+                    "TASK-001",
+                    "--type",
+                    "bug",
+                    "--message",
+                    "should be rejected",
+                ]
+            )
+            == 1
+        )
 
 
 def test_finding_update_requires_resolution_when_closing(
