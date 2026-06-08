@@ -31,6 +31,7 @@ def run_tasks(
     manifest: Manifest,
     selected_task_ids: set[str],
     max_parallel: int | None = None,
+    plans: tuple[object, ...] = (),
 ) -> dict[str, int]:
     max_workers = max_parallel or config.max_parallel
     states = StateStore(config.runs_root)
@@ -45,7 +46,7 @@ def run_tasks(
         while pending or active:
             launched = False
             state_snapshot = states.load()
-            queries = WorkflowQueries(config, manifest=manifest, states=state_snapshot)
+            queries = WorkflowQueries(config, manifest=manifest, plans=plans, states=state_snapshot)
 
             for task in list(pending):
                 if len(active) >= max_workers:

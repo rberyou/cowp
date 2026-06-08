@@ -13,10 +13,12 @@ from cowp.config import (
     ProjectConfig,
     config_path,
     default_config_data,
+    load_json,
     load_manifest,
     load_project_config,
     paths_overlap,
     pool_root_for,
+    resolve_control_path,
     validate_project,
     write_json,
 )
@@ -37,15 +39,27 @@ from cowp.gitops import (
     task_worktree,
 )
 from cowp.planning import (
+    REPLACEMENT_CONTRACTS,
+    add_plan_decision,
+    add_plan_finding,
+    add_plan_task,
     export_ready_tasks_many,
     init_plan,
+    link_plan_replacement,
     load_all_plans,
     load_feature_plan,
     load_plan,
     plan_next_all_lines,
     plan_next_lines,
     plan_status_lines,
+    require_replan,
+    resolve_plan_decision,
+    resolve_plan_finding,
+    resolve_replan,
+    set_plan_status,
+    update_plan_task,
     validate_plan_collection,
+    withdraw_plan_task,
 )
 from cowp.queries import (
     WorkflowQueries,
@@ -56,8 +70,8 @@ from cowp.runner import RunnerError, run_tasks
 from cowp.server import ServerError, serve_backlog
 from cowp.state import StateStore, TaskState, now_iso
 
-START_SKIP_STATUSES = {"worktree_created", "running", "worker_succeeded", "merged"}
-RUN_SKIP_STATUSES = {"worker_succeeded", "merged"}
+START_SKIP_STATUSES = {"worktree_created", "running", "worker_succeeded", "merged", "superseded", "withdrawn"}
+RUN_SKIP_STATUSES = {"worker_succeeded", "merged", "superseded", "withdrawn"}
 FINDING_TYPES = {"bug", "design", "docs", "test", "boundary"}
 FINDING_STATUSES = {"open", "resolved", "invalid", "wontfix"}
 DISALLOWED_WONTFIX_SEVERITIES = {"P0", "P1"}
@@ -130,6 +144,100 @@ def build_parser() -> argparse.ArgumentParser:
     plan_export.add_argument("--ignore-dependency-state", action="store_true")
     plan_export.add_argument("--runnable-only", action="store_true")
     plan_export.set_defaults(func=cmd_plan_export_ready)
+
+    plan_add_task = plan_sub.add_parser("add-task", help="add a task to a feature plan from JSON")
+    plan_add_task.add_argument("--repo", required=True)
+    plan_add_task.add_argument("--pool-dir")
+    add_single_plan_selection(plan_add_task)
+    plan_add_task.add_argument("--task-file", required=True)
+    plan_add_task.add_argument("--reason")
+    plan_add_task.set_defaults(func=cmd_plan_add_task)
+
+    plan_update_task = plan_sub.add_parser("update-task", help="update a task in a feature plan from JSON")
+    plan_update_task.add_argument("--repo", required=True)
+    plan_update_task.add_argument("--pool-dir")
+    add_single_plan_selection(plan_update_task)
+    plan_update_task.add_argument("--task", required=True)
+    plan_update_task.add_argument("--task-file", required=True)
+    plan_update_task.add_argument("--reason")
+    plan_update_task.set_defaults(func=cmd_plan_update_task)
+
+    plan_add_decision = plan_sub.add_parser("add-decision", help="record a planning decision question")
+    plan_add_decision.add_argument("--repo", required=True)
+    plan_add_decision.add_argument("--pool-dir")
+    add_single_plan_selection(plan_add_decision)
+    plan_add_decision.add_argument("--question", required=True)
+    plan_add_decision.set_defaults(func=cmd_plan_add_decision)
+
+    plan_resolve_decision = plan_sub.add_parser("resolve-decision", help="resolve a planning decision")
+    plan_resolve_decision.add_argument("--repo", required=True)
+    plan_resolve_decision.add_argument("--pool-dir")
+    add_single_plan_selection(plan_resolve_decision)
+    plan_resolve_decision.add_argument("--decision", required=True)
+    plan_resolve_decision.add_argument("--resolution", required=True)
+    plan_resolve_decision.set_defaults(func=cmd_plan_resolve_decision)
+
+    plan_add_finding = plan_sub.add_parser("add-finding", help="record a planning review finding")
+    plan_add_finding.add_argument("--repo", required=True)
+    plan_add_finding.add_argument("--pool-dir")
+    add_single_plan_selection(plan_add_finding)
+    plan_add_finding.add_argument("--message", required=True)
+    plan_add_finding.add_argument("--severity", default="P2")
+    plan_add_finding.add_argument("--type", default="design")
+    plan_add_finding.add_argument("--contract-change", action="store_true")
+    plan_add_finding.set_defaults(func=cmd_plan_add_finding)
+
+    plan_resolve_finding = plan_sub.add_parser("resolve-finding", help="resolve a planning review finding")
+    plan_resolve_finding.add_argument("--repo", required=True)
+    plan_resolve_finding.add_argument("--pool-dir")
+    add_single_plan_selection(plan_resolve_finding)
+    plan_resolve_finding.add_argument("--finding", required=True)
+    plan_resolve_finding.add_argument("--resolution", required=True)
+    plan_resolve_finding.set_defaults(func=cmd_plan_resolve_finding)
+
+    plan_set_status = plan_sub.add_parser("set-status", help="change feature planning status")
+    plan_set_status.add_argument("--repo", required=True)
+    plan_set_status.add_argument("--pool-dir")
+    add_single_plan_selection(plan_set_status)
+    plan_set_status.add_argument("--status", required=True)
+    plan_set_status.add_argument("--reason")
+    plan_set_status.set_defaults(func=cmd_plan_set_status)
+
+    plan_require_replan = plan_sub.add_parser("require-replan", help="block a task until replanning is resolved")
+    plan_require_replan.add_argument("--repo", required=True)
+    plan_require_replan.add_argument("--pool-dir")
+    add_single_plan_selection(plan_require_replan)
+    plan_require_replan.add_argument("--task", required=True)
+    plan_require_replan.add_argument("--blocked-by")
+    plan_require_replan.add_argument("--reason", required=True)
+    plan_require_replan.set_defaults(func=cmd_plan_require_replan)
+
+    plan_resolve_replan = plan_sub.add_parser("resolve-replan", help="resolve a replan blocker")
+    plan_resolve_replan.add_argument("--repo", required=True)
+    plan_resolve_replan.add_argument("--pool-dir")
+    add_single_plan_selection(plan_resolve_replan)
+    plan_resolve_replan.add_argument("--blocker", required=True)
+    plan_resolve_replan.add_argument("--resolution", required=True)
+    plan_resolve_replan.set_defaults(func=cmd_plan_resolve_replan)
+
+    plan_link_replacement = plan_sub.add_parser("link-replacement", help="link a superseded task to a replacement")
+    plan_link_replacement.add_argument("--repo", required=True)
+    plan_link_replacement.add_argument("--pool-dir")
+    add_single_plan_selection(plan_link_replacement)
+    plan_link_replacement.add_argument("--task", required=True)
+    plan_link_replacement.add_argument("--replacement", required=True)
+    plan_link_replacement.add_argument("--contract", required=True, choices=sorted(REPLACEMENT_CONTRACTS))
+    plan_link_replacement.set_defaults(func=cmd_plan_link_replacement)
+
+    plan_withdraw_task = plan_sub.add_parser("withdraw-task", help="withdraw an exported pre-run task")
+    plan_withdraw_task.add_argument("--repo", required=True)
+    plan_withdraw_task.add_argument("--pool-dir")
+    add_single_plan_selection(plan_withdraw_task)
+    plan_withdraw_task.add_argument("--manifest", required=True)
+    plan_withdraw_task.add_argument("--task", required=True)
+    plan_withdraw_task.add_argument("--replacement", action="append", required=True)
+    plan_withdraw_task.add_argument("--reason", required=True)
+    plan_withdraw_task.set_defaults(func=cmd_plan_withdraw_task)
 
     backlog = sub.add_parser("backlog", help="show multi-feature backlog state")
     backlog_sub = backlog.add_subparsers(dest="backlog_command", required=True)
@@ -209,6 +317,13 @@ def build_parser() -> argparse.ArgumentParser:
     finding_resolve.add_argument("--test-command")
     finding_resolve.set_defaults(func=cmd_finding_resolve)
 
+    supersede = sub.add_parser("supersede-task", help="mark an execution task as superseded")
+    add_repo_manifest(supersede)
+    supersede.add_argument("--task", required=True)
+    supersede.add_argument("--finding", action="append", required=True)
+    supersede.add_argument("--reason", required=True)
+    supersede.set_defaults(func=cmd_supersede_task)
+
     finish = sub.add_parser("finish", help="commit and merge a reviewed task")
     add_repo_manifest(finish)
     finish.add_argument("--task", required=True)
@@ -232,6 +347,12 @@ def add_plan_selection(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--plan")
     group.add_argument("--feature")
     group.add_argument("--all", action="store_true")
+
+
+def add_single_plan_selection(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--plan")
+    group.add_argument("--feature")
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -345,6 +466,109 @@ def cmd_plan_export_ready(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan_add_task(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    task_data = load_task_json(config, args.task_file)
+    add_plan_task(config, plan, task_data, reason=args.reason)
+    print(f"{task_data.get('id')}: added")
+    return 0
+
+
+def cmd_plan_update_task(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    task_data = load_task_json(config, args.task_file)
+    update_plan_task(config, plan, args.task, task_data, reason=args.reason)
+    print(f"{args.task}: updated")
+    return 0
+
+
+def cmd_plan_add_decision(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    decision_id = add_plan_decision(plan, args.question)
+    print(f"{decision_id}: added")
+    return 0
+
+
+def cmd_plan_resolve_decision(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    resolve_plan_decision(plan, args.decision, args.resolution)
+    print(f"{args.decision}: resolved")
+    return 0
+
+
+def cmd_plan_add_finding(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    finding_id = add_plan_finding(
+        plan,
+        args.message,
+        severity=args.severity,
+        finding_type=args.type,
+        contract_change=args.contract_change,
+    )
+    print(f"{finding_id}: added")
+    return 0
+
+
+def cmd_plan_resolve_finding(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    resolve_plan_finding(plan, args.finding, args.resolution)
+    print(f"{args.finding}: resolved")
+    return 0
+
+
+def cmd_plan_set_status(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    set_plan_status(config, plan, args.status, reason=args.reason)
+    print(f"{plan.feature_id}: {args.status}")
+    return 0
+
+
+def cmd_plan_require_replan(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    blocker_id = require_replan(plan, args.task, args.blocked_by, args.reason)
+    print(f"{args.task}: replan required {blocker_id}")
+    return 0
+
+
+def cmd_plan_resolve_replan(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    resolve_replan(config, plan, args.blocker, args.resolution)
+    print(f"{args.blocker}: resolved")
+    return 0
+
+
+def cmd_plan_link_replacement(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    link_plan_replacement(config, plan, args.task, args.replacement, args.contract)
+    print(f"{args.task}: replaced by {args.replacement} contract={args.contract}")
+    return 0
+
+
+def cmd_plan_withdraw_task(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    withdraw_plan_task(
+        config,
+        plan,
+        args.manifest,
+        args.task,
+        list(args.replacement or []),
+        args.reason,
+    )
+    print(f"{args.task}: withdrawn")
+    return 0
+
+
 def cmd_backlog_status(args: argparse.Namespace) -> int:
     config = load_project_config(args.repo, args.pool_dir)
     for line in backlog_status_lines(config):
@@ -427,6 +651,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not args.all and not args.task:
         raise ConfigError("run requires --all or at least one --task")
     config, manifest = load_inputs(args)
+    plans = load_all_plans(config)
     result = validate_project(config, manifest)
     if result.errors:
         print_validation(result)
@@ -436,12 +661,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         task_ids = {
             task.id
             for task in manifest.tasks
+            if task.active and not task.withdrawn
             if not states.get(task.id) or states[task.id].status not in RUN_SKIP_STATUSES
         }
     else:
         task_ids = set(args.task)
         states = StateStore(config.runs_root).load()
-        queries = WorkflowQueries(config, manifest=manifest, plans=load_all_plans(config), states=states)
+        queries = WorkflowQueries(config, manifest=manifest, plans=plans, states=states)
         known_task_ids = {task.id for task in manifest.tasks}
         for task in selected_tasks(manifest, task_ids):
             blockers = queries.run_blockers(task, known_task_ids=known_task_ids)
@@ -450,7 +676,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not task_ids:
         print("no tasks to run")
         return 0
-    results = run_tasks(config, manifest, task_ids, max_parallel=args.max_parallel)
+    results = run_tasks(config, manifest, task_ids, max_parallel=args.max_parallel, plans=plans)
     for task_id, exit_code in sorted(results.items()):
         print(f"{task_id}: exit_code={exit_code}")
     return 0 if all(code == 0 for code in results.values()) else 1
@@ -645,6 +871,45 @@ def cmd_finding_resolve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_supersede_task(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    manifest.get_task(args.task)
+    store = StateStore(config.runs_root)
+    state = get_or_create_task_state(store, args.task)
+    if state.status in {"planned", "worktree_created", "running", "merged", "superseded"}:
+        raise ConfigError(f"{args.task}: cannot supersede execution status {state.status}")
+    findings = list(state.task_review_findings or [])
+    selected = [find_review_finding(findings, finding_id) for finding_id in args.finding]
+    active_boundary = [
+        finding
+        for finding in selected
+        if finding.get("status", "open") != "invalid"
+        and (finding.get("type") == "boundary" or bool(finding.get("contract_change", False)))
+    ]
+    if not active_boundary:
+        raise ConfigError(f"{args.task}: supersede requires a boundary or contract_change finding")
+    previous = state.to_json()
+    updated = store.update(
+        args.task,
+        status="superseded",
+        review_status="superseded",
+        superseded_reason=args.reason,
+        superseded_at=now_for_cli(),
+        superseded_finding_ids=list(args.finding),
+    )
+    store.append_audit_event(
+        args.task,
+        "supersede-task",
+        f"superseded {args.task}",
+        reason=args.reason,
+        findings=list(args.finding),
+        before={"status": previous.get("status"), "review_status": previous.get("review_status")},
+        after={"status": updated.status, "review_status": updated.review_status},
+    )
+    print(f"{args.task}: superseded")
+    return 0
+
+
 def cmd_finish(args: argparse.Namespace) -> int:
     config, manifest = load_inputs(args)
     task = manifest.get_task(args.task)
@@ -725,6 +990,8 @@ def extend_manifest_workflow_validation(config: ProjectConfig, manifest: Manifes
     queries = WorkflowQueries(config, manifest=manifest, plans=plans)
     known_task_ids = {task.id for task in manifest.tasks}
     for task in manifest.tasks:
+        if getattr(task, "withdrawn", False) and not getattr(task, "active", True):
+            continue
         state = queries.states.get(task.id)
         if state and state.status == "merged":
             continue
@@ -746,6 +1013,21 @@ def selected_plans(config: ProjectConfig, args: argparse.Namespace):
     if getattr(args, "feature", None):
         return (load_feature_plan(config, args.feature),)
     return (load_plan(config, args.plan),)
+
+
+def selected_plan(config: ProjectConfig, args: argparse.Namespace):
+    plans = selected_plans(config, args)
+    if len(plans) != 1:
+        raise ConfigError("command requires exactly one selected plan")
+    return plans[0]
+
+
+def load_task_json(config: ProjectConfig, task_file: str) -> dict:
+    path = resolve_control_path(config, task_file)
+    data = load_json(path)
+    if not isinstance(data, dict):
+        raise ConfigError(f"task file must contain a JSON object: {path}")
+    return data
 
 
 def validation_scope_plans(config: ProjectConfig, args: argparse.Namespace):
@@ -831,7 +1113,7 @@ def finish_gate(
     state: TaskState,
     reviewed_files: list[str],
 ) -> str | None:
-    blockers = WorkflowQueries(config, states={task.id: state}).merge_blockers(task, state)
+    blockers = WorkflowQueries(config, plans=load_all_plans(config), states={task.id: state}).merge_blockers(task, state)
     if blockers:
         store.append_audit_event(task.id, "finish", "refused finish with merge blockers", blockers=blockers)
         raise GitError(f"{task.id}: merge blockers remain: {'; '.join(blockers)}")

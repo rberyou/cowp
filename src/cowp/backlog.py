@@ -32,9 +32,17 @@ class BacklogTask:
     column: str | None
     plan_status: str | None
     depends_on: tuple[str, ...]
+    declared_depends_on: tuple[str, ...]
+    effective_depends_on: tuple[str, ...]
     blockers: tuple[str, ...]
     review_findings: tuple[str, ...]
     execution_status: str
+    superseded_by: str | None
+    replacement_contract: str | None
+    replaces: str | None
+    superseded_reason: str | None
+    withdrawn_reason: str | None
+    withdrawn_replacement_tasks: tuple[str, ...]
     worker: str | None
     branch: str | None
     worktree: str | None
@@ -222,9 +230,11 @@ def _task_snapshot(
     state: TaskState | None,
     queries: WorkflowQueries,
 ) -> BacklogTask:
+    metadata = queries.current_dependency_metadata(task)
     blockers = tuple(_task_blockers(plan, task, all_plans, queries))
+    execution_blockers = tuple(_task_execution_blockers(state))
     review_blockers = tuple(_task_review_blockers(state))
-    combined_blockers = tuple([*blockers, *review_blockers])
+    combined_blockers = tuple([*blockers, *execution_blockers, *review_blockers])
     column = backlog_column_for_task(plan, task, state, combined_blockers)
     return BacklogTask(
         task_id=task.id,
@@ -232,10 +242,18 @@ def _task_snapshot(
         feature_id=plan.feature_id,
         column=column,
         plan_status=task.status,
-        depends_on=task.depends_on,
+        depends_on=metadata.effective,
+        declared_depends_on=metadata.declared,
+        effective_depends_on=metadata.effective,
         blockers=combined_blockers,
         review_findings=tuple(_task_review_finding_lines(state)),
         execution_status=state.status if state else "planned",
+        superseded_by=task.superseded_by,
+        replacement_contract=task.replacement_contract if task.superseded_by else None,
+        replaces=task.replaces,
+        superseded_reason=state.superseded_reason if state else None,
+        withdrawn_reason=task.withdrawn_reason,
+        withdrawn_replacement_tasks=task.withdrawn_replacement_tasks,
         worker=state.worker if state and state.worker else task.worker or "default",
         branch=state.branch if state else None,
         worktree=state.worktree if state else None,
@@ -256,6 +274,8 @@ def backlog_column_for_task(
     blockers: tuple[str, ...],
 ) -> str:
     if state:
+        if state.status in {"superseded", "withdrawn"}:
+            return "Blocked"
         if state.status == "worker_succeeded" and _task_review_blockers(state):
             return "Review Blocked"
         state_column = _column_for_execution_status(state.status)
@@ -312,9 +332,21 @@ def _unassigned_manifest_tasks(
                 column=_column_for_execution_status(state.status) if state else None,
                 plan_status=None,
                 depends_on=tuple(str(dep).strip() for dep in raw.get("depends_on") or [] if str(dep).strip()),
+                declared_depends_on=tuple(str(dep).strip() for dep in raw.get("declared_depends_on") or raw.get("depends_on") or [] if str(dep).strip()),
+                effective_depends_on=tuple(str(dep).strip() for dep in raw.get("effective_depends_on") or raw.get("depends_on") or [] if str(dep).strip()),
                 blockers=(),
                 review_findings=tuple(_task_review_finding_lines(state)),
                 execution_status=state.status if state else "planned",
+                superseded_by=None,
+                replacement_contract=None,
+                replaces=None,
+                superseded_reason=state.superseded_reason if state else None,
+                withdrawn_reason=_optional_str(raw.get("withdrawn_reason")),
+                withdrawn_replacement_tasks=tuple(
+                    str(item).strip()
+                    for item in raw.get("withdrawn_replacement_tasks") or []
+                    if str(item).strip()
+                ),
                 worker=state.worker if state and state.worker else _optional_str(raw.get("worker")),
                 branch=state.branch if state else None,
                 worktree=state.worktree if state else None,
@@ -347,6 +379,17 @@ def _feature_lines(feature: BacklogFeature) -> list[str]:
         lines.append(_task_line(task))
         if task.depends_on:
             lines.append("      depends_on: " + ", ".join(task.depends_on))
+        if task.declared_depends_on != task.effective_depends_on:
+            lines.append("      declared_depends_on: " + ", ".join(task.declared_depends_on))
+            lines.append("      effective_depends_on: " + ", ".join(task.effective_depends_on))
+        if task.superseded_by:
+            lines.append(f"      superseded_by: {task.superseded_by} contract={task.replacement_contract}")
+        if task.replaces:
+            lines.append(f"      replaces: {task.replaces}")
+        if task.withdrawn_reason:
+            lines.append("      withdrawn_reason: " + task.withdrawn_reason)
+        if task.withdrawn_replacement_tasks:
+            lines.append("      withdrawn_replacements: " + ", ".join(task.withdrawn_replacement_tasks))
         if task.blockers:
             lines.append("      blocked_by: " + "; ".join(task.blockers))
         if task.review_findings:
@@ -361,6 +404,8 @@ def _task_line(task: BacklogTask, indent: str = "    ") -> str:
 
 
 def _column_for_execution_status(status: str) -> str | None:
+    if status in {"superseded", "withdrawn"}:
+        return "Blocked"
     if status == "worker_failed":
         return "Failed"
     if status == "running":
@@ -370,6 +415,17 @@ def _column_for_execution_status(status: str) -> str | None:
     if status == "merged":
         return "Merged"
     return None
+
+
+def _task_execution_blockers(state: TaskState | None) -> list[str]:
+    if not state:
+        return []
+    if state.status == "superseded":
+        reason = f": {state.superseded_reason}" if state.superseded_reason else ""
+        return [f"task is superseded{reason}"]
+    if state.status == "withdrawn":
+        return ["task execution status is withdrawn"]
+    return []
 
 
 def _task_review_blockers(state: TaskState | None) -> list[str]:
@@ -415,6 +471,9 @@ def _task_blockers(
     blockers: list[str] = []
     if task.status == "blocked":
         blockers.append("task plan status is blocked")
+    if task.status == "withdrawn":
+        reason = f": {task.withdrawn_reason}" if task.withdrawn_reason else ""
+        blockers.append(f"task is withdrawn{reason}")
     if task.status in {"ready", "exported", "blocked"}:
         blockers.extend(queries.feature_dependency_blockers(plan, all_plans))
         blockers.extend(_task_dependency_blockers(plan, task, queries))
@@ -455,9 +514,17 @@ def _task_to_dict(task: BacklogTask) -> dict[str, Any]:
         "column": task.column,
         "plan_status": task.plan_status,
         "depends_on": list(task.depends_on),
+        "declared_depends_on": list(task.declared_depends_on),
+        "effective_depends_on": list(task.effective_depends_on),
         "blockers": list(task.blockers),
         "review_findings": list(task.review_findings),
         "execution_status": task.execution_status,
+        "superseded_by": task.superseded_by,
+        "replacement_contract": task.replacement_contract,
+        "replaces": task.replaces,
+        "superseded_reason": task.superseded_reason,
+        "withdrawn_reason": task.withdrawn_reason,
+        "withdrawn_replacement_tasks": list(task.withdrawn_replacement_tasks),
         "worker": task.worker,
         "branch": task.branch,
         "worktree": task.worktree,

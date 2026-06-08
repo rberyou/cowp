@@ -964,6 +964,328 @@ def test_backlog_status_groups_clarify_and_needs_review(
     assert "TASK-002 exported execution=worker_succeeded" in output
 
 
+def test_plan_mutation_commands_write_audit_events(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    path = _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "mutations",
+            "status": "draft",
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "audit_events": [],
+            "tasks": [],
+        },
+    )
+    draft = git_repo / ".codex-workerpool" / "drafts" / "TASK-001.json"
+    write_json(
+        draft,
+        {
+            "id": "TASK-001",
+            "title": "draft task",
+            "status": "draft",
+            "allowed_files": ["src/example.py"],
+            "prompt": "WRITE src/example.py",
+        },
+    )
+
+    assert main(["plan", "add-task", "--repo", str(git_repo), "--plan", str(path), "--task-file", "drafts/TASK-001.json"]) == 0
+    assert main(["plan", "add-decision", "--repo", str(git_repo), "--plan", str(path), "--question", "API shape?"]) == 0
+    assert main(["plan", "resolve-decision", "--repo", str(git_repo), "--plan", str(path), "--decision", "D-001", "--resolution", "Keep API stable"]) == 0
+    assert main(["plan", "add-finding", "--repo", str(git_repo), "--plan", str(path), "--message", "Need tighter scope"]) == 0
+    assert main(["plan", "resolve-finding", "--repo", str(git_repo), "--plan", str(path), "--finding", "F-001", "--resolution", "Scope updated"]) == 0
+    assert main(["plan", "set-status", "--repo", str(git_repo), "--plan", str(path), "--status", "review"]) == 0
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert [task["id"] for task in data["tasks"]] == ["TASK-001"]
+    commands = [event["command"] for event in data["audit_events"]]
+    assert commands == [
+        "plan add-task",
+        "plan add-decision",
+        "plan resolve-decision",
+        "plan add-finding",
+        "plan resolve-finding",
+        "plan set-status",
+    ]
+
+
+def test_compatible_replacement_chain_controls_downstream_readiness(
+    git_repo: Path,
+    workerpool_config: Path,
+    capsys,
+):
+    path = _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "replacement",
+            "status": "exported",
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "old api",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                    "contract": "Defines the API.",
+                },
+                {
+                    "id": "TASK-002",
+                    "title": "replacement api",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                    "contract": "Defines the compatible API.",
+                },
+                {
+                    "id": "TASK-003",
+                    "title": "downstream",
+                    "status": "ready",
+                    "depends_on": ["TASK-001"],
+                    "allowed_files": ["tests/test_example.py"],
+                    "prompt": "WRITE tests/test_example.py",
+                },
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    StateStore(config.runs_root).update("TASK-001", status="superseded")
+
+    assert (
+        main(
+            [
+                "plan",
+                "link-replacement",
+                "--repo",
+                str(git_repo),
+                "--plan",
+                str(path),
+                "--task",
+                "TASK-001",
+                "--replacement",
+                "TASK-002",
+                "--contract",
+                "compatible",
+            ]
+        )
+        == 0
+    )
+
+    assert main(["plan", "next", "--repo", str(git_repo), "--plan", str(path)]) == 0
+    output = capsys.readouterr().out
+    assert "TASK-003 blocked: dependency 'TASK-002' is not merged" in output
+
+    StateStore(config.runs_root).update("TASK-002", status="merged")
+    assert main(["plan", "next", "--repo", str(git_repo), "--plan", str(path)]) == 0
+    output = capsys.readouterr().out
+    assert "TASK-003 runnable" in output
+
+
+def test_exported_downstream_is_stale_until_force_reexport_after_replacement(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+    capsys,
+):
+    path = _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "stale replacement",
+            "status": "exported",
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "old api",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                    "contract": "Old API.",
+                },
+                {
+                    "id": "TASK-002",
+                    "title": "downstream",
+                    "status": "ready",
+                    "depends_on": ["TASK-001"],
+                    "allowed_files": ["tests/test_example.py"],
+                    "prompt": "WRITE tests/test_example.py",
+                },
+                {
+                    "id": "TASK-003",
+                    "title": "replacement",
+                    "status": "draft",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                    "contract": "Compatible replacement API.",
+                },
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    assert export_ready_tasks(config, load_plan(git_repo, path), ".codex-workerpool/tasks.json", task_id="TASK-001") == ["TASK-001"]
+    StateStore(config.runs_root).update("TASK-001", status="merged")
+    assert export_ready_tasks(config, load_plan(git_repo, path), ".codex-workerpool/tasks.json", task_id="TASK-002") == ["TASK-002"]
+
+    StateStore(config.runs_root).update("TASK-001", status="superseded")
+    assert (
+        main(
+            [
+                "plan",
+                "link-replacement",
+                "--repo",
+                str(git_repo),
+                "--plan",
+                str(path),
+                "--task",
+                "TASK-001",
+                "--replacement",
+                "TASK-003",
+                "--contract",
+                "compatible",
+            ]
+        )
+        == 0
+    )
+    assert main(["validate", "--repo", str(git_repo), "--manifest", ".codex-workerpool/tasks.json"]) == 1
+    captured = capsys.readouterr()
+    assert "TASK-002 dependency metadata is stale; re-export task prompt" in captured.err
+
+    linked_plan = json.loads(path.read_text(encoding="utf-8"))
+    linked_plan["tasks"][2]["status"] = "ready"
+    write_json(path, linked_plan)
+    assert export_ready_tasks(config, load_plan(git_repo, path), ".codex-workerpool/tasks.json", task_id="TASK-003") == ["TASK-003"]
+    StateStore(config.runs_root).update("TASK-003", status="merged")
+    assert (
+        main(
+            [
+                "plan",
+                "export-ready",
+                "--repo",
+                str(git_repo),
+                "--plan",
+                str(path),
+                "--manifest",
+                ".codex-workerpool/tasks.json",
+                "--task",
+                "TASK-002",
+                "--force",
+            ]
+        )
+        == 0
+    )
+    manifest = json.loads((git_repo / ".codex-workerpool" / "tasks.json").read_text(encoding="utf-8"))
+    item = next(task for task in manifest["tasks"] if task["id"] == "TASK-002")
+    assert item["declared_depends_on"] == ["TASK-001"]
+    assert item["effective_depends_on"] == ["TASK-003"]
+    assert item["depends_on"] == ["TASK-003"]
+    assert main(["validate", "--repo", str(git_repo), "--manifest", ".codex-workerpool/tasks.json"]) == 0
+
+
+def test_withdraw_task_marks_exported_manifest_entry_inactive(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    path = _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "withdraw",
+            "status": "exported",
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "old task",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+                {
+                    "id": "TASK-002",
+                    "title": "replacement task",
+                    "status": "ready",
+                    "allowed_files": ["tests/test_example.py"],
+                    "prompt": "WRITE tests/test_example.py",
+                },
+            ],
+        },
+    )
+    assert (
+        main(
+            [
+                "plan",
+                "export-ready",
+                "--repo",
+                str(git_repo),
+                "--plan",
+                str(path),
+                "--manifest",
+                ".codex-workerpool/tasks.json",
+                "--task",
+                "TASK-001",
+            ]
+        )
+        == 0
+    )
+
+    assert (
+        main(
+            [
+                "plan",
+                "withdraw-task",
+                "--repo",
+                str(git_repo),
+                "--plan",
+                str(path),
+                "--manifest",
+                ".codex-workerpool/tasks.json",
+                "--task",
+                "TASK-001",
+                "--replacement",
+                "TASK-002",
+                "--reason",
+                "Split before worker execution",
+            ]
+        )
+        == 0
+    )
+
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    assert plan["tasks"][0]["status"] == "withdrawn"
+    assert plan["tasks"][0]["withdrawn_replacement_tasks"] == ["TASK-002"]
+    manifest = json.loads((git_repo / ".codex-workerpool" / "tasks.json").read_text(encoding="utf-8"))
+    assert manifest["tasks"][0]["active"] is False
+    assert manifest["tasks"][0]["withdrawn"] is True
+    assert main(["validate", "--repo", str(git_repo), "--manifest", ".codex-workerpool/tasks.json"]) == 0
+    assert (
+        main(
+            [
+                "start",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                ".codex-workerpool/tasks.json",
+                "--task",
+                "TASK-001",
+            ]
+        )
+        == 1
+    )
+
+
 def _write_plan(repo: Path, data: dict) -> Path:
     path = repo / ".codex-workerpool" / "plans" / "FEATURE-001.plan.json"
     write_json(path, data)

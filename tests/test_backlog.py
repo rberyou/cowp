@@ -252,6 +252,71 @@ def test_worker_succeeded_with_open_review_finding_moves_to_review_blocked(
     assert not _column(data, "Needs Codex Review")["features"]
 
 
+def test_snapshot_shows_replacement_and_withdrawal_details(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "replacement visibility",
+            "status": "exported",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "old",
+                    "status": "exported",
+                    "superseded_by": "TASK-002",
+                    "replacement_contract": "compatible",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+                {
+                    "id": "TASK-002",
+                    "title": "new",
+                    "status": "ready",
+                    "replaces": "TASK-001",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+                {
+                    "id": "TASK-003",
+                    "title": "withdrawn",
+                    "status": "withdrawn",
+                    "withdrawn_reason": "Split before run",
+                    "withdrawn_replacement_tasks": ["TASK-002"],
+                    "allowed_files": ["README.md"],
+                    "prompt": "WRITE README.md",
+                },
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    StateStore(config.runs_root).update(
+        "TASK-001",
+        status="superseded",
+        superseded_reason="Boundary changed",
+    )
+
+    data = backlog_snapshot_to_dict(build_backlog_snapshot(config))
+
+    blocked = _feature(_column(data, "Blocked"), "FEATURE-001")
+    old_task = next(task for task in blocked["tasks"] if task["task_id"] == "TASK-001")
+    withdrawn = next(task for task in blocked["tasks"] if task["task_id"] == "TASK-003")
+    assert old_task["superseded_by"] == "TASK-002"
+    assert old_task["replacement_contract"] == "compatible"
+    assert "task is superseded: Boundary changed" in old_task["blockers"]
+    assert withdrawn["withdrawn_reason"] == "Split before run"
+    assert withdrawn["withdrawn_replacement_tasks"] == ["TASK-002"]
+    assert "task is withdrawn: Split before run" in withdrawn["blockers"]
+
+
 def test_backlog_status_lines_render_from_snapshot(git_repo: Path, workerpool_config: Path):
     _write_feature_plan(
         git_repo,

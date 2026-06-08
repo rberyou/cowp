@@ -137,6 +137,24 @@ dependency mapping after export, `cowp validate`, `cowp start`, and `cowp run`
 surface a stale prompt blocker. Re-export the task with
 `cowp plan export-ready --force` before starting or running it.
 
+If a task was exported but has not produced reviewable worker output and the
+planned scope must be split or replaced, use the narrow pre-run withdrawal path:
+
+```powershell
+cowp plan withdraw-task `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --plan plans/FEATURE-001.plan.json `
+  --manifest tasks.json `
+  --task TASK-001 `
+  --replacement TASK-002 `
+  --reason "split before worker execution"
+```
+
+Withdrawn manifest entries stay in `tasks.json` for audit, but `start`, `run`,
+and `finish` refuse them. Export replacement tasks with
+`cowp plan export-ready` after the plan validates.
+
 Plan validation rejects ready tasks when `agent/TASK-NNN` or the configured task
 worktree path already exists. Reuse of historical task ids is intentionally
 blocked; choose a new task id or explicitly remove the old branch/worktree.
@@ -237,6 +255,41 @@ Open findings block `finish`. Boundary findings and findings marked
 `contract_change` remain non-mergeable even after a normal resolution; reclassify
 mistaken findings with `cowp finding update` or mark erroneous findings
 `invalid` with audit evidence.
+
+If the boundary or contract issue is real and cannot be fixed inside
+`allowed_files`, do not merge the original task. Mark it superseded, create a
+replacement task through planning, and link the replacement contract:
+
+```powershell
+cowp supersede-task `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --task TASK-001 `
+  --finding RF-001 `
+  --reason "requires a replacement task boundary"
+
+cowp plan add-task `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --plan plans/FEATURE-001.plan.json `
+  --task-file drafts\TASK-002.json `
+  --reason "replacement for TASK-001"
+
+cowp plan link-replacement `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --plan plans/FEATURE-001.plan.json `
+  --task TASK-001 `
+  --replacement TASK-002 `
+  --contract compatible
+```
+
+Use `--contract unknown` or `--contract changed` when downstream assumptions
+must be reviewed. Add replan blockers with `cowp plan require-replan`, update
+affected downstream tasks with `cowp plan update-task`, resolve blockers with
+`cowp plan resolve-replan`, and re-export stale prompts with
+`cowp plan export-ready --force`.
 
 If review passes:
 

@@ -404,13 +404,24 @@ def dashboard_html(refresh_ms: int) -> str:
       root.appendChild(main);
       const grid = el('div', 'task-grid');
       const dependsOn = (task.depends_on || []).join(', ');
+      const declaredDependsOn = (task.declared_depends_on || []).join(', ');
+      const effectiveDependsOn = (task.effective_depends_on || []).join(', ');
       const blockers = (task.blockers || []).join('; ');
       const reviewFindings = (task.review_findings || []).join('; ');
+      const withdrawnReplacements = (task.withdrawn_replacement_tasks || []).join(', ');
       const pairs = [
         ['plan', task.plan_status],
         ['depends_on', dependsOn],
+        ['declared_depends_on', declaredDependsOn],
+        ['effective_depends_on', effectiveDependsOn],
         ['blocked_by', blockers],
         ['review_findings', reviewFindings],
+        ['superseded_by', task.superseded_by],
+        ['replacement_contract', task.replacement_contract],
+        ['replaces', task.replaces],
+        ['superseded_reason', task.superseded_reason],
+        ['withdrawn_reason', task.withdrawn_reason],
+        ['withdrawn_replacements', withdrawnReplacements],
         ['worker', task.worker],
         ['branch', task.branch],
         ['worktree', task.worktree],

@@ -68,6 +68,9 @@ class ManifestTask:
     dependency_metadata_present: bool = False
     active: bool = True
     withdrawn: bool = False
+    withdrawn_at: str | None = None
+    withdrawn_reason: str | None = None
+    withdrawn_replacement_tasks: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -261,6 +264,13 @@ def load_manifest(config_or_repo: ProjectConfig | Path, manifest_path: str | Pat
                 dependency_metadata_present=dependency_metadata_present,
                 active=bool(raw.get("active", True)),
                 withdrawn=bool(raw.get("withdrawn", False)),
+                withdrawn_at=_optional_str(raw.get("withdrawn_at")),
+                withdrawn_reason=_optional_str(raw.get("withdrawn_reason")),
+                withdrawn_replacement_tasks=tuple(
+                    str(task_id).strip()
+                    for task_id in raw.get("withdrawn_replacement_tasks") or ()
+                    if str(task_id).strip()
+                ),
             )
         )
     return Manifest(path=path, tasks=tuple(tasks))
@@ -297,7 +307,11 @@ def validate_project(config: ProjectConfig, manifest: Manifest) -> ValidationRes
                 result.errors.append(f"{task.id}: unknown dependency '{dep}'")
 
     merged_task_ids = _merged_task_ids(config)
-    active_tasks = [task for task in manifest.tasks if task.id not in merged_task_ids]
+    active_tasks = [
+        task
+        for task in manifest.tasks
+        if task.id not in merged_task_ids and task.active and not task.withdrawn
+    ]
     for left, right in overlapping_task_pairs(active_tasks):
         result.warnings.append(f"{left.id} and {right.id} have overlapping allowed_files")
 

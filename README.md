@@ -73,6 +73,16 @@ cowp finding resolve --repo G:\workspace\Project --pool-dir G:\workspace\Project
 cowp finish --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001 --reviewed-files src/example.py tests/test_example.py
 ```
 
+When review finds a boundary or contract issue that cannot be completed inside
+the task's allowed files, mark the execution task superseded and create a
+replacement through planning:
+
+```powershell
+cowp supersede-task --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001 --finding RF-001 --reason "requires a wider task boundary"
+cowp plan add-task --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --plan plans\FEATURE-001.plan.json --task-file drafts\TASK-002.json --reason "replacement for TASK-001"
+cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --plan plans\FEATURE-001.plan.json --task TASK-001 --replacement TASK-002 --contract compatible
+```
+
 ## Model
 
 - One task maps to one branch and one worktree.
@@ -105,6 +115,13 @@ cowp finish --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpo
 - Task dependencies are satisfied only by execution state `merged`.
   `worker_succeeded` means the task is waiting for Codex review and does not
   unlock downstream tasks.
+- `superseded` is a terminal execution state for reviewed tasks that cannot be
+  finished safely inside their allowed-file boundary. Superseded tasks are
+  non-mergeable and only count complete through an explicit compatible
+  replacement chain whose terminal task is merged.
+- `cowp plan withdraw-task` is only for exported pre-run planning corrections.
+  It marks the manifest entry inactive/withdrawn for audit, requires explicit
+  same-feature replacement tasks, and cannot be used after worker output exists.
 - `cowp plan export-ready` writes dependency metadata into the manifest. If the
   plan dependency mapping changes after export, `cowp validate`, `cowp start`,
   and `cowp run` block the stale task until it is re-exported with

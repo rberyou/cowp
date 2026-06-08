@@ -602,6 +602,88 @@ def test_boundary_finding_blocks_finish_even_when_resolved_until_reclassified(
     )
 
 
+def test_supersede_task_marks_execution_terminal_and_finish_refuses(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "supersede me",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    assert (
+        main(
+            [
+                "finding",
+                "add",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--type",
+                "boundary",
+                "--severity",
+                "P1",
+                "--contract-change",
+                "--message",
+                "Requires files outside allowed_files",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "supersede-task",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--finding",
+                "RF-001",
+                "--reason",
+                "Boundary cannot be fixed inside allowed files",
+            ]
+        )
+        == 0
+    )
+
+    state = StateStore(git_repo.parent / "repo.runs").load()["TASK-001"]
+    assert state.status == "superseded"
+    assert state.superseded_finding_ids == ["RF-001"]
+    assert (
+        main(
+            [
+                "finish",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--reviewed-files",
+                "src/example.py",
+            ]
+        )
+        == 1
+    )
+
+
 def test_finding_update_requires_resolution_when_closing(
     git_repo: Path,
     workerpool_config: Path,
