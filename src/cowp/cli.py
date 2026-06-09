@@ -79,13 +79,37 @@ REVIEW_MUTATION_STATUSES = {"worker_succeeded", "worker_failed"}
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_standard_streams()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         return args.func(args)
     except (ConfigError, GitError, RunnerError, ServerError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        _safe_print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+
+
+def configure_standard_streams() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        try:
+            reconfigure(encoding=encoding, errors="replace")
+        except (OSError, ValueError):
+            continue
+
+
+def _safe_print(*values: object, sep: str = " ", end: str = "\n", file=None) -> None:
+    stream = file or sys.stdout
+    text = sep.join(str(value) for value in values) + end
+    try:
+        stream.write(text)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        safe_text = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        stream.write(safe_text)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -763,22 +787,22 @@ def cmd_review(args: argparse.Namespace) -> int:
         review_snapshot_preserved=preserve_snapshot,
         review_diff_path=state.review_diff_path if preserve_snapshot else str(diff_path),
     )
-    print(f"# {task.id} {task.title}")
+    _safe_print(f"# {task.id} {task.title}")
     if preserve_snapshot:
-        print("\n## recorded commit retry")
-        print("Task branch HEAD matches a recorded finish attempt; preserving previous review diff.")
-        print(f"review diff: {state.review_diff_path}")
-    print("\n## git status")
-    print(status or "<clean>")
-    print("\n## diff stat")
-    print(diff_stat or "<no diff>")
-    print("\n## diff")
-    print(diff or "<no diff>")
+        _safe_print("\n## recorded commit retry")
+        _safe_print("Task branch HEAD matches a recorded finish attempt; preserving previous review diff.")
+        _safe_print(f"review diff: {state.review_diff_path}")
+    _safe_print("\n## git status")
+    _safe_print(status or "<clean>")
+    _safe_print("\n## diff stat")
+    _safe_print(diff_stat or "<no diff>")
+    _safe_print("\n## diff")
+    _safe_print(diff or "<no diff>")
     log_path = config.runs_root / task.id / "opencode.jsonl"
     if log_path.exists():
-        print("\n## worker log tail")
+        _safe_print("\n## worker log tail")
         lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        print("\n".join(lines[-args.log_tail:]))
+        _safe_print("\n".join(lines[-args.log_tail:]))
     return 0
 
 

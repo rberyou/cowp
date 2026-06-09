@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -918,6 +919,56 @@ def test_review_includes_untracked_allowed_file_diff(
     review_diff_text = review_diff.read_text(encoding="utf-8")
     assert "review strategy" in review_diff_text
     assert "知识点复习 𝄞" in review_diff_text
+
+
+def test_review_log_tail_tolerates_strict_legacy_stdout_encoding(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+    monkeypatch,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "encoding-safe review",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    log_path = git_repo.parent / "repo.runs" / "TASK-001" / "opencode.jsonl"
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write('{"message":"replacement \ufffd emoji 🚀 中文"}\n')
+
+    raw = io.BytesIO()
+    stdout = io.TextIOWrapper(raw, encoding="gbk", errors="strict")
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    assert (
+        main(
+            [
+                "review",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--log-tail",
+                "5",
+            ]
+        )
+        == 0
+    )
+    stdout.flush()
+    output = raw.getvalue().decode("gbk")
+    assert "## worker log tail" in output
+    assert "replacement ? emoji ? 中文" in output
 
 
 def test_start_clears_previous_failure_state(

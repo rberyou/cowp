@@ -252,6 +252,56 @@ def test_worker_succeeded_with_open_review_finding_moves_to_review_blocked(
     assert not _column(data, "Needs Codex Review")["features"]
 
 
+def test_resolved_nonblocking_review_finding_is_hidden_from_task_card(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "resolved finding",
+            "status": "exported",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "merged task",
+                    "status": "exported",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                }
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    StateStore(config.runs_root).update(
+        "TASK-001",
+        status="merged",
+        task_review_findings=[
+            {
+                "id": "RF-001",
+                "type": "bug",
+                "severity": "P2",
+                "status": "resolved",
+                "message": "already fixed",
+                "resolution": "fixed in src/example.py",
+            }
+        ],
+    )
+
+    data = backlog_snapshot_to_dict(build_backlog_snapshot(config))
+
+    merged = _feature(_column(data, "Merged"), "FEATURE-001")
+    assert merged["tasks"][0]["task_id"] == "TASK-001"
+    assert merged["tasks"][0]["review_findings"] == []
+    assert not _column(data, "Review Blocked")["features"]
+
+
 def test_snapshot_shows_replacement_and_withdrawal_details(
     git_repo: Path,
     workerpool_config: Path,

@@ -446,6 +446,8 @@ def _task_review_finding_lines(state: TaskState | None) -> list[str]:
         return []
     lines: list[str] = []
     for finding in state.task_review_findings or []:
+        if not review_finding_blockers([finding]):
+            continue
         lines.append(
             f"{finding.get('id')} "
             f"{finding.get('status', 'open')} "
