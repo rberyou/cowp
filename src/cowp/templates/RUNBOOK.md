@@ -351,10 +351,16 @@ reviewed files, refuses unreviewed changes, and runs task acceptance without
 allowing it to mutate reviewed code. Implementation tasks are committed by the
 controlled finish step. Integration tasks may already contain reviewed branch
 commits and can finish from a clean worktree when the branch is ahead of its
-effective base branch. The controller acceptance check runs inside
+effective base branch.
+
+For implementation tasks, the controller acceptance check runs inside
 `git merge --no-ff --no-commit` before the merge commit is created; on failure,
-the merge is aborted and the base branch is left unchanged. Finish attempts are
-recorded in state so a failed merge gate can be retried deterministically.
+the merge is aborted and the base branch is left unchanged. For integration
+tasks, `target_branch` is the integration result branch. `finish` runs
+controller acceptance in the integration worktree, records the task as `merged`
+for dependency tracking, and does not merge the integration branch back into the
+repository `base_branch`. Finish attempts are recorded in state so a failed gate
+can be retried deterministically.
 
 ## 8. Refresh Local Workflow Files
 

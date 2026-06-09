@@ -381,6 +381,57 @@ def finish_task(
         review_snapshot_hash=expected_snapshot_hash,
         reused_task_commit=reused_task_commit,
     )
+    if is_integration_task(task):
+        integration_snapshot = task_snapshot_hash_from_base(worktree, base_commit_sha)
+        integration_untracked = set(_untracked_files(worktree))
+        try:
+            if main_acceptance_command:
+                main_acceptance_exit_code = run_acceptance(main_acceptance_command, worktree)
+                if task_snapshot_hash_from_base(worktree, base_commit_sha) != integration_snapshot:
+                    failed = FinishResult(
+                        worker_acceptance_exit_code=worker_acceptance_exit_code,
+                        main_acceptance_exit_code=main_acceptance_exit_code,
+                        base_commit_sha=base_commit_sha,
+                        parent_task_commit_sha=parent_task_commit_sha,
+                        task_commit_sha=task_commit_sha,
+                        covered_commit_range=covered,
+                        review_snapshot_hash=expected_snapshot_hash,
+                        merge_commit_sha=task_commit_sha,
+                        reused_task_commit=reused_task_commit,
+                    )
+                    restore_error = _cleanup_acceptance_mutation(worktree, integration_untracked)
+                    raise FinishError(
+                        _with_restore_error("integration acceptance mutated the task worktree", restore_error),
+                        failed,
+                    )
+        except AcceptanceError as exc:
+            failed = FinishResult(
+                worker_acceptance_exit_code=worker_acceptance_exit_code,
+                main_acceptance_exit_code=exc.exit_code,
+                base_commit_sha=base_commit_sha,
+                parent_task_commit_sha=parent_task_commit_sha,
+                task_commit_sha=task_commit_sha,
+                covered_commit_range=covered,
+                review_snapshot_hash=expected_snapshot_hash,
+                merge_commit_sha=task_commit_sha,
+                reused_task_commit=reused_task_commit,
+            )
+            raise FinishError(str(exc), failed) from exc
+
+        if not keep_worktree:
+            run_checked(["git", "-C", str(config.repo), "worktree", "remove", "--force", str(worktree)])
+        return FinishResult(
+            worker_acceptance_exit_code=worker_acceptance_exit_code,
+            main_acceptance_exit_code=main_acceptance_exit_code,
+            base_commit_sha=base_commit_sha,
+            parent_task_commit_sha=parent_task_commit_sha,
+            task_commit_sha=task_commit_sha,
+            covered_commit_range=covered,
+            review_snapshot_hash=expected_snapshot_hash,
+            merge_commit_sha=task_commit_sha,
+            reused_task_commit=reused_task_commit,
+        )
+
     git(config, "checkout", config.base_branch)
 
     try:
@@ -484,8 +535,12 @@ def _abort_merge(config: ProjectConfig) -> str | None:
 
 
 def _restore_worktree_from_index(config: ProjectConfig) -> str | None:
+    return _restore_path_from_index(config.repo)
+
+
+def _restore_path_from_index(worktree: Path) -> str | None:
     checkout = subprocess.run(
-        ["git", "-C", str(config.repo), "checkout-index", "-f", "-a"],
+        ["git", "-C", str(worktree), "checkout-index", "-f", "-a"],
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -519,15 +574,19 @@ def _clear_merge_state_to_head(config: ProjectConfig) -> str | None:
 
 
 def _cleanup_main_acceptance_mutation(config: ProjectConfig, baseline_untracked: set[str]) -> str | None:
+    return _cleanup_acceptance_mutation(config.repo, baseline_untracked)
+
+
+def _cleanup_acceptance_mutation(worktree: Path, baseline_untracked: set[str]) -> str | None:
     errors: list[str] = []
-    restore_error = _restore_worktree_from_index(config)
+    restore_error = _restore_path_from_index(worktree)
     if restore_error:
         errors.append(restore_error)
-    current_untracked = set(_untracked_files(config.repo))
+    current_untracked = set(_untracked_files(worktree))
     for rel_path in sorted(current_untracked - baseline_untracked):
-        path = (config.repo / rel_path).resolve()
+        path = (worktree / rel_path).resolve()
         try:
-            path.relative_to(config.repo.resolve())
+            path.relative_to(worktree.resolve())
         except ValueError:
             errors.append(f"refusing to remove unexpected untracked path: {path}")
             continue
@@ -548,9 +607,14 @@ def _with_abort_error(message: str, abort_error: str | None) -> str:
 
 
 def _with_restore_abort_error(message: str, restore_error: str | None, abort_error: str | None) -> str:
-    if restore_error:
-        message = f"{message}\nmerge snapshot restore failed: {restore_error}"
+    message = _with_restore_error(message, restore_error)
     return _with_abort_error(message, abort_error)
+
+
+def _with_restore_error(message: str, restore_error: str | None) -> str:
+    if restore_error:
+        message = f"{message}\nacceptance snapshot restore failed: {restore_error}"
+    return message
 
 
 def _untracked_files(worktree: Path) -> list[str]:

@@ -206,10 +206,15 @@ def test_integration_task_start_run_review_finish(
         == 0
     )
 
-    assert (git_repo / "src" / "example.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert (git_repo / "src" / "example.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert run(["git", "show", "integration/TASK-901:src/example.py"], git_repo).stdout == "VALUE = 2\n"
     state = StateStore(config.runs_root).load()["TASK-901"]
     assert state.status == "merged"
     assert state.worker is None
+    assert state.finish_attempts[-1]["merge_commit_sha"] == run(
+        ["git", "rev-parse", "integration/TASK-901"],
+        git_repo,
+    ).stdout.strip()
 
 
 def test_run_all_skips_integration_without_unlocking_downstream_task(

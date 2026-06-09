@@ -173,9 +173,13 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
   worker/manual commits made before the controlled finish step. Integration
   tasks may already contain reviewed branch commits and can finish from a clean
   worktree when the branch is ahead of its effective base branch.
-- `finish` runs the controller acceptance inside a `git merge --no-ff
-  --no-commit` transaction and creates the merge commit only after acceptance
-  passes.
+- For implementation tasks, `finish` runs the controller acceptance inside a
+  `git merge --no-ff --no-commit` transaction and creates the merge commit only
+  after acceptance passes.
+- For integration tasks, `finish` treats `target_branch` as the integration
+  result branch. It runs controller acceptance in the integration worktree,
+  records the task as `merged` for dependency tracking, and does not merge the
+  integration branch back into the repository `base_branch`.
 - `finish` records reviewed files, final diff snapshot, acceptance command
   results, and finish attempts in `runs_root/state.json`.
 - Worker merge is intentionally serial and controlled by Codex.
