@@ -138,6 +138,10 @@ For dependency chains, export only the next runnable batch. By default,
 `export-ready` refuses to export tasks whose dependencies are not `merged` in the
 execution state.
 
+Integration tasks do not consume worker `max_parallel` capacity in `plan next`
+or `export-ready --runnable-only`. They are still blocked by dependencies, and
+their declared `allowed_files` still participate in overlap checks.
+
 Task dependencies are satisfied only after the upstream task is `merged`.
 `worker_succeeded` means the upstream task needs Codex review; downstream tasks
 remain blocked and must not start or run yet.

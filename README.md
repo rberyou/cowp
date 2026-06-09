@@ -128,7 +128,8 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
   `runs_root/state.json`.
 - Multiple OpenCode workers may run concurrently when their `allowed_files` do
   not overlap and their dependencies are satisfied.
-- Integration tasks do not consume worker profile capacity. If they declare
+- Integration tasks do not consume worker profile capacity or `max_parallel`
+  worker slots in planning/export batch selection. If they declare
   `allowed_files`, those paths are still shown and validated as review scope;
   an empty `allowed_files` list means unrestricted review scope, not "no files".
 - Task dependencies are satisfied only by execution state `merged`.

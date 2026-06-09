@@ -656,11 +656,10 @@ def next_runnable_tasks(
     limit = max_parallel or config.max_parallel
     selected: list[tuple[FeaturePlan, PlanTask]] = []
     worker_counts: dict[str, int] = {}
+    selected_worker_count = 0
     for plan in plans:
         for task in plan.tasks:
             if _plan_task_blockers(config, plan, task, ignore_dependency_state, dependency_scope):
-                continue
-            if len(selected) >= limit:
                 continue
             if any(
                 (task.allowed_files or other.allowed_files) and paths_overlap(task.allowed_files, other.allowed_files)
@@ -670,11 +669,14 @@ def next_runnable_tasks(
             if task.kind == TASK_KIND_INTEGRATION:
                 selected.append((plan, task))
                 continue
+            if selected_worker_count >= limit:
+                continue
             worker_id = task.worker or "default"
             worker = config.workers.get(worker_id)
             if worker and worker_counts.get(worker_id, 0) >= worker.max_parallel:
                 continue
             selected.append((plan, task))
+            selected_worker_count += 1
             worker_counts[worker_id] = worker_counts.get(worker_id, 0) + 1
     return selected
 
@@ -1096,16 +1098,19 @@ def _batch_selection_blocker(
         if (task.allowed_files or selected.allowed_files) and paths_overlap(task.allowed_files, selected.allowed_files):
             return f"allowed_files overlaps with selected {selected.id}"
     if task.kind == TASK_KIND_INTEGRATION:
-        if len(selected_tasks) >= max_parallel:
-            return "max_parallel limit reached"
         return "not selected for this batch"
     worker_id = task.worker or "default"
     worker = config.workers.get(worker_id)
     if worker:
-        worker_count = sum(1 for selected in selected_tasks if (selected.worker or "default") == worker_id)
+        worker_count = sum(
+            1
+            for selected in selected_tasks
+            if selected.kind == TASK_KIND_IMPLEMENTATION and (selected.worker or "default") == worker_id
+        )
         if worker_count >= worker.max_parallel:
             return f"worker '{worker_id}' max_parallel reached"
-    if len(selected_tasks) >= max_parallel:
+    selected_worker_count = sum(1 for selected in selected_tasks if selected.kind == TASK_KIND_IMPLEMENTATION)
+    if selected_worker_count >= max_parallel:
         return "max_parallel limit reached"
     return "not selected for this batch"
 

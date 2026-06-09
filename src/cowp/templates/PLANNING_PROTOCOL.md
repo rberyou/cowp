@@ -158,6 +158,9 @@ the execution state unless `--ignore-dependency-state` is passed.
 
 `--runnable-only` exports only the next dependency-satisfied, non-overlapping
 batch. Later ready tasks remain in the plan until their dependencies merge.
+Integration tasks do not consume worker `max_parallel` slots in this batch
+selection, but any `allowed_files` they declare still protect against ambiguous
+overlap with selected tasks.
 
 Exported prompts include a `Task Contract` section for the current task and a
 `Dependency Contracts` section for task dependencies and feature dependencies.
