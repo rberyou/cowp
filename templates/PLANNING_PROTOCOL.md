@@ -49,6 +49,8 @@ Break the work into small, reviewable tasks with clear boundaries.
 Required output per task:
 
 - Task id and title
+- Task kind: `implementation` for delegated OpenCode work, or `integration`
+  for Codex-owned controller work
 - Dependency list
 - Dependency contract for any downstream task that will consume this task's
   API, schema, helper command, or behavior
@@ -96,15 +98,22 @@ Review passes only when:
 A task is ready only when all of these are true:
 
 - The goal can be implemented without further product discussion.
-- Allowed files are narrow enough for review.
+- For implementation tasks, allowed files are narrow enough for review.
+- For integration tasks, instructions or source branches explain the Codex-owned
+  work; optional allowed files define review scope, and empty allowed files mean
+  unrestricted review scope.
 - Dependencies are explicit.
 - Dependency contracts are explicit for downstream tasks.
 - Acceptance criteria are testable.
-- The task does not require the worker to choose architecture.
-- The worker prompt names non-goals and forbidden operations.
+- Implementation tasks do not require the worker to choose architecture.
+- Implementation worker prompts name non-goals and forbidden operations.
+- Integration tasks are reserved for controller work that should be done by
+  Codex instead of delegated to an OpenCode worker.
 - All open decisions and review findings are resolved.
-- The task id does not collide with an existing `agent/TASK-NNN` branch or the
-  configured task worktree path.
+- The task branch does not collide with an existing branch: `agent/TASK-NNN` for
+  implementation tasks, or `target_branch` / `integration/TASK-NNN` for
+  integration tasks.
+- The task id does not collide with the configured task worktree path.
 
 Use the machine-readable plan file as the source of truth:
 
@@ -139,8 +148,10 @@ cowp plan export-ready `
   --runnable-only
 ```
 
-`export-ready` writes `tasks/TASK-NNN.md`, updates `tasks.json`, and changes the
-planning task status to `exported`.
+`export-ready` writes `tasks/TASK-NNN.md` for implementation tasks, updates
+`tasks.json`, and changes the planning task status to `exported`. Integration
+tasks do not get worker prompt files; their `instructions`, `source_branches`,
+and branch metadata are written directly into `tasks.json`.
 
 For tasks with `depends_on`, export requires dependency tasks to be `merged` in
 the execution state unless `--ignore-dependency-state` is passed.
@@ -154,9 +165,8 @@ If any contract is missing or stale, the worker must stop and report the
 mismatch instead of using old draft assumptions.
 
 Plan validation checks ready tasks for stale task branches and configured
-worktree paths before export. If `agent/TASK-NNN` or the task worktree already
-exists, choose a new task id or explicitly clean up the old worker branch and
-worktree.
+worktree paths before export. If the task branch or task worktree already
+exists, choose a new task id or explicitly clean up the old branch/worktree.
 
 After export, review and either commit the workerpool metadata or keep it ignored
 locally before running `cowp start`, because the execution layer expects a clean
@@ -170,7 +180,9 @@ Only ready tasks are copied into:
 
 ```text
 tasks.json
-tasks/TASK-NNN.md
+tasks/TASK-NNN.md  # implementation tasks only
 ```
 
 This prevents `cowp start` or `cowp run --all` from executing ambiguous work.
+Integration tasks appear in `tasks.json` but are skipped by `cowp run`; Codex
+must complete them directly in the task worktree before review and finish.

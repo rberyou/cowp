@@ -10,6 +10,7 @@ from cowp.config import (
     Manifest,
     ManifestTask,
     ProjectConfig,
+    is_integration_task,
     paths_overlap,
     prompt_text,
     worker_for_task,
@@ -37,10 +38,29 @@ def run_tasks(
     states = StateStore(config.runs_root)
     task_map = {task.id: task for task in manifest.tasks if task.id in selected_task_ids}
     known_task_ids = {task.id for task in manifest.tasks}
-    pending = list(task_map.values())
+    results: dict[str, int] = {}
+    state_snapshot = states.load()
+    initial_queries = WorkflowQueries(config, manifest=manifest, plans=plans, states=state_snapshot)
+    blocked_integration_tasks: list[ManifestTask] = []
+    integration_tasks: list[ManifestTask] = []
+    for task in task_map.values():
+        if not is_integration_task(task):
+            continue
+        if initial_queries.run_blockers(task, known_task_ids=known_task_ids):
+            blocked_integration_tasks.append(task)
+        else:
+            integration_tasks.append(task)
+    for task in integration_tasks:
+        results[task.id] = skip_integration_task(config, task)
+    pending = [task for task in task_map.values() if not is_integration_task(task)]
+    if not pending and not results and blocked_integration_tasks:
+        blocked = ", ".join(
+            _blocked_task_summary(initial_queries, task, known_task_ids)
+            for task in blocked_integration_tasks
+        )
+        raise RunnerError(f"no runnable tasks; blocked tasks: {blocked}")
     active: dict[concurrent.futures.Future[int], ManifestTask] = {}
     active_by_worker: dict[str, int] = {}
-    results: dict[str, int] = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         while pending or active:
@@ -93,6 +113,24 @@ def run_tasks(
                 results[task.id] = future.result()
 
     return results
+
+
+def skip_integration_task(config: ProjectConfig, task: ManifestTask) -> int:
+    worktree = task_worktree(config, task.id)
+    if not worktree.exists():
+        raise RunnerError(f"{task.id}: worktree does not exist: {worktree}")
+    states = StateStore(config.runs_root)
+    state = states.load().get(task.id)
+    if state is None:
+        states.update(task.id, status="planned", exit_code=0, error=None)
+    else:
+        states.update(task.id, exit_code=0, error=None)
+    states.append_audit_event(
+        task.id,
+        "run",
+        "skipped integration task; Codex-owned work must be completed manually",
+    )
+    return 0
 
 
 def run_one_task(config: ProjectConfig, task: ManifestTask) -> int:

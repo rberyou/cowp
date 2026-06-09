@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from cowp.cli import main
-from cowp.config import default_config_data, write_json
+from cowp.config import default_config_data, load_project_config, write_json
 from cowp.state import StateStore
 from tests.conftest import run, write_manifest
 
@@ -146,6 +146,236 @@ def test_plan_exported_manifest_runs_execution_flow(
         )
         == 0
     )
+
+
+def test_integration_task_start_run_review_finish(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    base_branch = run(["git", "branch", "--show-current"], git_repo).stdout.strip()
+    run(["git", "checkout", "-b", "feature/source"], git_repo)
+    (git_repo / "src" / "example.py").write_text("VALUE = 2\n", encoding="utf-8")
+    run(["git", "add", "src/example.py"], git_repo)
+    run(["git", "commit", "-m", "source change"], git_repo)
+    run(["git", "checkout", base_branch], git_repo)
+
+    manifest = git_repo / ".codex-workerpool" / "tasks.json"
+    write_json(
+        manifest,
+        {
+            "tasks": [
+                {
+                    "id": "TASK-901",
+                    "kind": "integration",
+                    "title": "integrate source branch",
+                    "target_branch": "integration/TASK-901",
+                    "source_branches": ["feature/source"],
+                    "instructions": "Merge the source branch and verify the result.",
+                    "acceptance_command": None,
+                }
+            ]
+        },
+    )
+    run(["git", "add", ".codex-workerpool"], git_repo)
+    run(["git", "commit", "-m", "add integration task"], git_repo)
+
+    assert main(["validate", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-901"]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-901"]) == 0
+
+    config = load_project_config(git_repo)
+    worktree = config.worktree_root / "TASK-901"
+    run(["git", "merge", "feature/source"], worktree)
+
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-901"]) == 0
+    assert (
+        main(
+            [
+                "finish",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-901",
+                "--reviewed-files",
+                "src/example.py",
+            ]
+        )
+        == 0
+    )
+
+    assert (git_repo / "src" / "example.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    state = StateStore(config.runs_root).load()["TASK-901"]
+    assert state.status == "merged"
+    assert state.worker is None
+
+
+def test_run_all_skips_integration_without_unlocking_downstream_task(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = git_repo / ".codex-workerpool" / "tasks.json"
+    prompt = git_repo / ".codex-workerpool" / "tasks" / "TASK-902.md"
+    prompt.parent.mkdir(parents=True, exist_ok=True)
+    prompt.write_text("# TASK-902 downstream\n\nWRITE tests/test_example.py\n", encoding="utf-8")
+    write_json(
+        manifest,
+        {
+            "tasks": [
+                {
+                    "id": "TASK-901",
+                    "kind": "integration",
+                    "title": "codex integration",
+                    "instructions": "Complete Codex-owned integration work.",
+                },
+                {
+                    "id": "TASK-902",
+                    "title": "downstream worker",
+                    "prompt_file": ".codex-workerpool/tasks/TASK-902.md",
+                    "allowed_files": ["tests/test_example.py"],
+                    "depends_on": ["TASK-901"],
+                },
+            ]
+        },
+    )
+    run(["git", "add", ".codex-workerpool"], git_repo)
+    run(["git", "commit", "-m", "add integration dependency manifest"], git_repo)
+
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+
+    states = StateStore(load_project_config(git_repo).runs_root).load()
+    assert states["TASK-901"].status == "worktree_created"
+    assert states["TASK-901"].exit_code == 0
+    assert "TASK-902" not in states
+
+
+def test_run_integration_requires_existing_worktree(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = git_repo / ".codex-workerpool" / "tasks.json"
+    write_json(
+        manifest,
+        {
+            "tasks": [
+                {
+                    "id": "TASK-901",
+                    "kind": "integration",
+                    "title": "codex integration",
+                    "instructions": "Complete Codex-owned integration work.",
+                }
+            ]
+        },
+    )
+    run(["git", "add", ".codex-workerpool"], git_repo)
+    run(["git", "commit", "-m", "add integration manifest"], git_repo)
+
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-901"]) == 1
+
+    states = StateStore(load_project_config(git_repo).runs_root).load()
+    assert "TASK-901" not in states
+
+
+def test_finish_integration_refuses_unreviewed_diff_files(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = git_repo / ".codex-workerpool" / "tasks.json"
+    write_json(
+        manifest,
+        {
+            "tasks": [
+                {
+                    "id": "TASK-901",
+                    "kind": "integration",
+                    "title": "codex integration",
+                    "instructions": "Edit and reconcile multiple files.",
+                }
+            ]
+        },
+    )
+    run(["git", "add", ".codex-workerpool"], git_repo)
+    run(["git", "commit", "-m", "add integration manifest"], git_repo)
+
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-901"]) == 0
+    config = load_project_config(git_repo)
+    worktree = config.worktree_root / "TASK-901"
+    (worktree / "src" / "example.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (worktree / "tests" / "test_example.py").write_text("def test_example():\n    assert False\n", encoding="utf-8")
+
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-901"]) == 0
+    assert (
+        main(
+            [
+                "finish",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-901",
+                "--reviewed-files",
+                "src/example.py",
+            ]
+        )
+        == 1
+    )
+    assert (git_repo / "src" / "example.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_finish_integration_rejects_invalid_reviewed_path_with_unrestricted_scope(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = git_repo / ".codex-workerpool" / "tasks.json"
+    write_json(
+        manifest,
+        {
+            "tasks": [
+                {
+                    "id": "TASK-901",
+                    "kind": "integration",
+                    "title": "codex integration",
+                    "instructions": "Edit a reviewed file.",
+                    "allowed_files": [],
+                }
+            ]
+        },
+    )
+    run(["git", "add", ".codex-workerpool"], git_repo)
+    run(["git", "commit", "-m", "add integration manifest"], git_repo)
+
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-901"]) == 0
+    config = load_project_config(git_repo)
+    worktree = config.worktree_root / "TASK-901"
+    (worktree / "src" / "example.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-901"]) == 0
+    assert (
+        main(
+            [
+                "finish",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-901",
+                "--reviewed-files",
+                "src/example.py",
+                "src/*.py",
+            ]
+        )
+        == 1
+    )
+    assert (git_repo / "src" / "example.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
 def test_external_pool_plan_exported_manifest_runs_execution_flow(

@@ -125,3 +125,76 @@ def test_manifest_validation_ignores_overlap_with_merged_tasks(
 
     assert result.ok
     assert not any("overlapping allowed_files" in warning for warning in result.warnings)
+
+
+def test_integration_manifest_does_not_require_worker_prompt_or_opencode(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    manifest_path = git_repo / ".codex-workerpool" / "integration.json"
+    manifest_path.write_text(
+        """
+{
+  "tasks": [
+    {
+      "id": "TASK-901",
+      "kind": "integration",
+      "title": "codex owned integration",
+      "instructions": "Inspect and integrate completed work.",
+      "allowed_files": []
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    config = parse_project_config(git_repo, default_config_data(git_repo))
+    manifest = load_manifest(config, manifest_path)
+
+    result = validate_project(config, manifest)
+
+    assert result.ok
+    task = manifest.get_task("TASK-901")
+    assert task.kind == "integration"
+    assert task.prompt_file is None
+    assert task.merge_order == ()
+
+
+def test_integration_manifest_validates_merge_metadata(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest_path = git_repo / ".codex-workerpool" / "bad-integration.json"
+    manifest_path.write_text(
+        """
+{
+  "tasks": [
+    {
+      "id": "TASK-901",
+      "kind": "integration",
+      "title": "bad integration",
+      "target_branch": "main",
+      "source_branches": ["missing/source"],
+      "merge_order": ["missing/source", "other/source"]
+    },
+    {
+      "id": "TASK-902",
+      "kind": "integration",
+      "title": "empty integration",
+      "target_branch": "integration/empty"
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    config = parse_project_config(git_repo, default_config_data(git_repo))
+    manifest = load_manifest(config, manifest_path)
+
+    result = validate_project(config, manifest)
+
+    assert not result.ok
+    assert any("source_branches ref not found: missing/source" in error for error in result.errors)
+    assert any("merge_order branches must be listed in source_branches" in error for error in result.errors)
+    assert any("integration task requires instructions or source_branches" in error for error in result.errors)

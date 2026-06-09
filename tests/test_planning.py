@@ -1514,6 +1514,50 @@ def test_validate_errors_on_replacement_state_consistency_blocker(
     assert "consistency: TASK-001 has replacement metadata" in capsys.readouterr().err
 
 
+def test_export_ready_preserves_integration_metadata_without_prompt_file(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    path = _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "integration feature",
+            "status": "ready",
+            "markdown": ".codex-workerpool/plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-901",
+                    "kind": "integration",
+                    "title": "codex integration",
+                    "status": "ready",
+                    "target_branch": "integration/TASK-901",
+                    "instructions": "Integrate completed branches and verify consistency.",
+                    "allowed_files": [],
+                }
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    plan = load_plan(git_repo, path)
+
+    result = validate_plan(config, plan)
+    assert result.ok
+
+    exported = export_ready_tasks(config, plan, ".codex-workerpool/tasks.json")
+
+    assert exported == ["TASK-901"]
+    manifest = json.loads((git_repo / ".codex-workerpool" / "tasks.json").read_text(encoding="utf-8"))
+    task = manifest["tasks"][0]
+    assert task["kind"] == "integration"
+    assert task["target_branch"] == "integration/TASK-901"
+    assert "instructions" in task
+    assert "prompt_file" not in task
+    assert not (git_repo / ".codex-workerpool" / "tasks" / "TASK-901.md").exists()
+
+
 def _write_plan(repo: Path, data: dict) -> Path:
     path = repo / ".codex-workerpool" / "plans" / "FEATURE-001.plan.json"
     write_json(path, data)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,8 @@ class BacklogTask:
     task_id: str
     title: str
     feature_id: str | None
+    kind: str
+    executor: str
     column: str | None
     plan_status: str | None
     depends_on: tuple[str, ...]
@@ -45,6 +48,11 @@ class BacklogTask:
     withdrawn_reason: str | None
     withdrawn_replacement_tasks: tuple[str, ...]
     worker: str | None
+    base_branch: str | None
+    target_branch: str | None
+    source_branches: tuple[str, ...]
+    merge_order: tuple[str, ...]
+    branch_ahead_count: int | None
     branch: str | None
     worktree: str | None
     exit_code: int | None
@@ -96,7 +104,7 @@ def build_backlog_snapshot(config: ProjectConfig) -> BacklogSnapshot:
     seen_task_ids: set[str] = set()
 
     for plan in plans:
-        tasks = tuple(_task_snapshot(plan, task, plans, states.get(task.id), queries) for task in plan.tasks)
+        tasks = tuple(_task_snapshot(config, plan, task, plans, states.get(task.id), queries) for task in plan.tasks)
         seen_task_ids.update(task.task_id for task in tasks)
         if tasks:
             for column in KANBAN_COLUMNS:
@@ -225,6 +233,7 @@ def _feature_snapshot(
 
 
 def _task_snapshot(
+    config: ProjectConfig,
     plan: FeaturePlan,
     task: PlanTask,
     all_plans: tuple[FeaturePlan, ...],
@@ -238,11 +247,15 @@ def _task_snapshot(
     combined_blockers = tuple([*blockers, *execution_blockers, *review_blockers])
     replacement_chain = queries.replacement_chain(task.id)
     visible_replacement_chain = replacement_chain if len(replacement_chain) > 1 else ()
-    column = backlog_column_for_task(plan, task, state, combined_blockers)
+    branch_ahead_count = _branch_ahead_count(config, task, state) if task.kind == "integration" else None
+    integration_has_changes = _integration_has_changes(task, state, branch_ahead_count)
+    column = backlog_column_for_task(plan, task, state, combined_blockers, integration_has_changes)
     return BacklogTask(
         task_id=task.id,
         title=task.title,
         feature_id=plan.feature_id,
+        kind=task.kind,
+        executor="codex" if task.kind == "integration" else "worker",
         column=column,
         plan_status=task.status,
         depends_on=metadata.effective,
@@ -258,7 +271,12 @@ def _task_snapshot(
         superseded_reason=state.superseded_reason if state else None,
         withdrawn_reason=task.withdrawn_reason,
         withdrawn_replacement_tasks=task.withdrawn_replacement_tasks,
-        worker=state.worker if state and state.worker else task.worker or "default",
+        worker=None if task.kind == "integration" else state.worker if state and state.worker else task.worker or "default",
+        base_branch=(task.base_branch or config.base_branch) if task.kind == "integration" else None,
+        target_branch=(task.target_branch or f"integration/{task.id}") if task.kind == "integration" else None,
+        source_branches=task.source_branches,
+        merge_order=task.merge_order,
+        branch_ahead_count=branch_ahead_count,
         branch=state.branch if state else None,
         worktree=state.worktree if state else None,
         exit_code=state.exit_code if state else None,
@@ -276,10 +294,15 @@ def backlog_column_for_task(
     task: PlanTask,
     state: TaskState | None,
     blockers: tuple[str, ...],
+    integration_has_changes: bool = False,
 ) -> str:
     if state:
         if state.status in {"superseded", "withdrawn"}:
             return "Blocked"
+        if task.kind == "integration" and state.status == "worktree_created" and integration_has_changes:
+            if _task_review_blockers(state):
+                return "Review Blocked"
+            return "Needs Codex Review"
         if state.status == "worker_succeeded" and _task_review_blockers(state):
             return "Review Blocked"
         state_column = _column_for_execution_status(state.status)
@@ -328,12 +351,28 @@ def _unassigned_manifest_tasks(
         if not task_id or task_id in seen_task_ids:
             continue
         state = states.get(task_id)
+        kind = str(raw.get("kind") or "implementation")
+        base_branch = _optional_str(raw.get("base_branch")) or (
+            config.base_branch if kind == "integration" else None
+        )
+        target_branch = _optional_str(raw.get("target_branch")) or (
+            f"integration/{task_id}" if kind == "integration" else None
+        )
+        source_branches = _string_tuple(raw.get("source_branches") or ())
+        merge_order = _string_tuple(raw["merge_order"]) if "merge_order" in raw else source_branches
+        branch_ahead_count = _raw_branch_ahead_count(config, base_branch, state) if kind == "integration" else None
+        integration_has_changes = _raw_integration_has_changes(kind, state, branch_ahead_count)
+        column = _column_for_execution_status(state.status) if state else None
+        if kind == "integration" and state and state.status == "worktree_created" and integration_has_changes:
+            column = "Review Blocked" if _task_review_blockers(state) else "Needs Codex Review"
         result.append(
             BacklogTask(
                 task_id=task_id,
                 title=str(raw.get("title") or task_id),
                 feature_id=_optional_str(raw.get("feature_id")),
-                column=_column_for_execution_status(state.status) if state else None,
+                kind=kind,
+                executor="codex" if kind == "integration" else "worker",
+                column=column,
                 plan_status=None,
                 depends_on=tuple(str(dep).strip() for dep in raw.get("depends_on") or [] if str(dep).strip()),
                 declared_depends_on=tuple(str(dep).strip() for dep in raw.get("declared_depends_on") or raw.get("depends_on") or [] if str(dep).strip()),
@@ -352,7 +391,16 @@ def _unassigned_manifest_tasks(
                     for item in raw.get("withdrawn_replacement_tasks") or []
                     if str(item).strip()
                 ),
-                worker=state.worker if state and state.worker else _optional_str(raw.get("worker")),
+                worker=(
+                    None
+                    if kind == "integration"
+                    else state.worker if state and state.worker else _optional_str(raw.get("worker"))
+                ),
+                base_branch=base_branch if kind == "integration" else None,
+                target_branch=target_branch if kind == "integration" else None,
+                source_branches=source_branches,
+                merge_order=merge_order,
+                branch_ahead_count=branch_ahead_count,
                 branch=state.branch if state else None,
                 worktree=state.worktree if state else None,
                 exit_code=state.exit_code if state else None,
@@ -397,6 +445,14 @@ def _feature_lines(feature: BacklogFeature) -> list[str]:
             lines.append("      withdrawn_reason: " + task.withdrawn_reason)
         if task.withdrawn_replacement_tasks:
             lines.append("      withdrawn_replacements: " + ", ".join(task.withdrawn_replacement_tasks))
+        if task.kind:
+            lines.append(f"      kind: {task.kind} executor={task.executor}")
+        if task.target_branch:
+            lines.append(f"      target_branch: {task.target_branch}")
+        if task.source_branches:
+            lines.append("      source_branches: " + ", ".join(task.source_branches))
+        if task.branch_ahead_count is not None:
+            lines.append(f"      branch_ahead: {task.branch_ahead_count}")
         if task.blockers:
             lines.append("      blocked_by: " + "; ".join(task.blockers))
         if task.review_findings:
@@ -521,6 +577,8 @@ def _task_to_dict(task: BacklogTask) -> dict[str, Any]:
         "task_id": task.task_id,
         "title": task.title,
         "feature_id": task.feature_id,
+        "kind": task.kind,
+        "executor": task.executor,
         "column": task.column,
         "plan_status": task.plan_status,
         "depends_on": list(task.depends_on),
@@ -537,6 +595,11 @@ def _task_to_dict(task: BacklogTask) -> dict[str, Any]:
         "withdrawn_reason": task.withdrawn_reason,
         "withdrawn_replacement_tasks": list(task.withdrawn_replacement_tasks),
         "worker": task.worker,
+        "base_branch": task.base_branch,
+        "target_branch": task.target_branch,
+        "source_branches": list(task.source_branches),
+        "merge_order": list(task.merge_order),
+        "branch_ahead_count": task.branch_ahead_count,
         "branch": task.branch,
         "worktree": task.worktree,
         "exit_code": task.exit_code,
@@ -554,3 +617,65 @@ def _optional_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _branch_ahead_count(config: ProjectConfig, task: PlanTask, state: TaskState | None) -> int | None:
+    return _raw_branch_ahead_count(config, task.base_branch, state)
+
+
+def _raw_branch_ahead_count(config: ProjectConfig, base_branch: str | None, state: TaskState | None) -> int | None:
+    if not state or not state.worktree:
+        return None
+    worktree = Path(state.worktree)
+    if not worktree.exists():
+        return None
+    base = base_branch or config.base_branch
+    proc = subprocess.run(
+        ["git", "-C", str(worktree), "rev-list", "--count", f"{base}..HEAD"],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        return int(proc.stdout.strip() or "0")
+    except ValueError:
+        return None
+
+
+def _integration_has_changes(
+    task: PlanTask,
+    state: TaskState | None,
+    branch_ahead_count: int | None,
+) -> bool:
+    return _raw_integration_has_changes(task.kind, state, branch_ahead_count)
+
+
+def _raw_integration_has_changes(
+    kind: str,
+    state: TaskState | None,
+    branch_ahead_count: int | None,
+) -> bool:
+    if kind != "integration" or not state or not state.worktree:
+        return False
+    if branch_ahead_count and branch_ahead_count > 0:
+        return True
+    worktree = Path(state.worktree)
+    if not worktree.exists():
+        return False
+    proc = subprocess.run(
+        ["git", "-C", str(worktree), "status", "--porcelain"],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+    )
+    return bool(proc.returncode == 0 and proc.stdout.strip())
+
+
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        value = (value,)
+    return tuple(str(item).strip() for item in value or () if str(item).strip())

@@ -54,6 +54,8 @@ Feature dependencies:
 
 Status: `review`
 
+Kind: `implementation`
+
 Depends on: none
 
 Dependency contract:
@@ -83,6 +85,14 @@ Worker prompt requirements:
 - Include blocked rule for required files outside allowed files.
 - Include non-goals.
 - Include acceptance command or repository default.
+
+For a Codex-owned controller task, use:
+
+- Kind: `integration`
+- Instructions: `<what Codex should integrate, inspect, or reconcile>`
+- Source branches: `<optional branch list>`
+- Target branch: `<optional; defaults to integration/TASK-NNN>`
+- Allowed files: `<optional review scope; empty means unrestricted review scope>`
 
 Export only after Review Gate and Ready Gate pass:
 

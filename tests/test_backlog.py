@@ -10,6 +10,7 @@ from cowp.backlog import (
 )
 from cowp.config import load_project_config, write_json
 from cowp.state import StateStore
+from tests.conftest import run
 
 
 def test_snapshot_groups_columns_and_merges_execution_state(git_repo: Path, workerpool_config: Path):
@@ -146,6 +147,96 @@ def test_snapshot_feature_dependency_blocker_and_unassigned_task(git_repo: Path,
     assert feature["blockers"] == ["depends on FEATURE-001"]
     assert data["unassigned_tasks"][0]["task_id"] == "TASK-099"
     assert data["unassigned_tasks"][0]["plan_status"] is None
+
+
+def test_snapshot_reports_integration_task_metadata(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "integration feature",
+            "status": "exported",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-901",
+                    "kind": "integration",
+                    "title": "codex owned",
+                    "status": "exported",
+                    "target_branch": "integration/TASK-901",
+                    "source_branches": ["feature/source"],
+                    "instructions": "Integrate source branch.",
+                }
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    StateStore(config.runs_root).update(
+        "TASK-901",
+        status="worktree_created",
+        branch="integration/TASK-901",
+        worktree=str(config.worktree_root / "TASK-901"),
+    )
+
+    data = backlog_snapshot_to_dict(build_backlog_snapshot(config))
+
+    task = _column(data, "Exported")["features"][0]["tasks"][0]
+    assert task["kind"] == "integration"
+    assert task["executor"] == "codex"
+    assert task["worker"] is None
+    assert task["target_branch"] == "integration/TASK-901"
+    assert task["source_branches"] == ["feature/source"]
+
+
+def test_unassigned_integration_task_with_changes_reports_review_metadata(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    config = load_project_config(git_repo)
+    manifest = git_repo / ".codex-workerpool" / "tasks.json"
+    write_json(
+        manifest,
+        {
+            "tasks": [
+                {
+                    "id": "TASK-901",
+                    "kind": "integration",
+                    "title": "codex owned",
+                    "source_branches": ["feature/source"],
+                    "instructions": "Integrate source branch.",
+                }
+            ]
+        },
+    )
+    run(["git", "add", ".codex-workerpool"], git_repo)
+    run(["git", "commit", "-m", "add unassigned integration task"], git_repo)
+    worktree = config.worktree_root / "TASK-901"
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    run(["git", "worktree", "add", "-b", "integration/TASK-901", str(worktree), "HEAD"], git_repo)
+    (worktree / "src" / "example.py").write_text("VALUE = 2\n", encoding="utf-8")
+    StateStore(config.runs_root).update(
+        "TASK-901",
+        status="worktree_created",
+        branch="integration/TASK-901",
+        worktree=str(worktree),
+    )
+
+    data = backlog_snapshot_to_dict(build_backlog_snapshot(config))
+
+    task = data["unassigned_tasks"][0]
+    assert task["kind"] == "integration"
+    assert task["executor"] == "codex"
+    assert task["column"] == "Needs Codex Review"
+    assert task["base_branch"] == config.base_branch
+    assert task["target_branch"] == "integration/TASK-901"
+    assert task["merge_order"] == ["feature/source"]
 
 
 def test_snapshot_places_tasks_in_their_own_columns_with_feature_grouping(
