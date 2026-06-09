@@ -137,6 +137,24 @@ dependency mapping after export, `cowp validate`, `cowp start`, and `cowp run`
 surface a stale prompt blocker. Re-export the task with
 `cowp plan export-ready --force` before starting or running it.
 
+If a task was exported but has not produced reviewable worker output and the
+planned scope must be split or replaced, use the narrow pre-run withdrawal path:
+
+```powershell
+cowp plan withdraw-task `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --plan plans/FEATURE-001.plan.json `
+  --manifest tasks.json `
+  --task TASK-001 `
+  --replacement TASK-002 `
+  --reason "split before worker execution"
+```
+
+Withdrawn manifest entries stay in `tasks.json` for audit, but `start`, `run`,
+and `finish` refuse them. Export replacement tasks with
+`cowp plan export-ready` after the plan validates.
+
 Plan validation rejects ready tasks when `agent/TASK-NNN` or the configured task
 worktree path already exists. Reuse of historical task ids is intentionally
 blocked; choose a new task id or explicitly remove the old branch/worktree.
@@ -164,9 +182,11 @@ cowp start --repo . --pool-dir ..\Project.workerpool --manifest tasks.json
 ```
 
 Without `--task`, `cowp start` skips tasks already marked `worktree_created`,
-`running`, `worker_succeeded`, or `merged`, plus tasks blocked by dependencies or
-stale dependency metadata. Use `--task TASK-NNN` only when you intend to start
-that specific task and want any blocker or collision to be reported.
+`running`, `worker_succeeded`, `merged`, `superseded`, or `withdrawn`, plus
+tasks blocked by dependencies or stale dependency metadata. Use `--task
+TASK-NNN` only when you intend to start that specific task and want any blocker
+or collision to be reported; explicit task selection still refuses non-runnable
+execution states.
 
 Prepare each worktree with the repository-specific environment setup. `cowp`
 does not create virtual environments, install packages, run CMake, or generate
@@ -178,10 +198,11 @@ language-specific build artifacts.
 cowp run --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --all --max-parallel 2
 ```
 
-With `--all`, `cowp run` skips tasks already marked `worker_succeeded` or
-`merged`. It also waits for dependency blockers to clear; a downstream task does
-not run while its upstream dependency is only `worker_succeeded`. Historical
-successful tasks can remain in `tasks.json` without being rerun.
+With `--all`, `cowp run` skips tasks already marked `worker_succeeded`,
+`merged`, `superseded`, or `withdrawn`. It also waits for dependency blockers to
+clear; a downstream task does not run while its upstream dependency is only
+`worker_succeeded`. Historical successful, superseded, or withdrawn tasks can
+remain in `tasks.json` without being rerun.
 
 OpenCode runs in pure mode by default. Logs are written under the configured
 `runs_root`. `cowp run` also writes `runs_root/TASK-NNN/effective-prompt.md`,
@@ -237,6 +258,41 @@ Open findings block `finish`. Boundary findings and findings marked
 `contract_change` remain non-mergeable even after a normal resolution; reclassify
 mistaken findings with `cowp finding update` or mark erroneous findings
 `invalid` with audit evidence.
+
+If the boundary or contract issue is real and cannot be fixed inside
+`allowed_files`, do not merge the original task. Mark it superseded, create a
+replacement task through planning, and link the replacement contract:
+
+```powershell
+cowp supersede-task `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --task TASK-001 `
+  --finding RF-001 `
+  --reason "requires a replacement task boundary"
+
+cowp plan add-task `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --plan plans/FEATURE-001.plan.json `
+  --task-file drafts\TASK-002.json `
+  --reason "replacement for TASK-001"
+
+cowp plan link-replacement `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --plan plans/FEATURE-001.plan.json `
+  --task TASK-001 `
+  --replacement TASK-002 `
+  --contract compatible
+```
+
+Use `--contract unknown` or `--contract changed` when downstream assumptions
+must be reviewed. Add replan blockers with `cowp plan require-replan`, update
+affected downstream tasks with `cowp plan update-task`, resolve blockers with
+`cowp plan resolve-replan`, and re-export stale prompts with
+`cowp plan export-ready --force`.
 
 If review passes:
 

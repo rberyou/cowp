@@ -12,6 +12,17 @@ from cowp.state import StateStore
 from tests.conftest import run, write_manifest
 
 
+def test_source_and_packaged_templates_stay_in_sync():
+    root = Path(__file__).resolve().parents[1]
+    source_templates = root / "templates"
+    packaged_templates = root / "src" / "cowp" / "templates"
+
+    for source_path in sorted(source_templates.glob("*.md")):
+        packaged_path = packaged_templates / source_path.name
+        assert packaged_path.is_file()
+        assert packaged_path.read_text(encoding="utf-8") == source_path.read_text(encoding="utf-8")
+
+
 def test_init_writes_planning_templates(git_repo: Path, fake_opencode: Path):
     assert main(["init", "--repo", str(git_repo)]) == 0
 

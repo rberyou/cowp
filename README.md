@@ -129,8 +129,11 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
 - Manifest overlap warnings ignore tasks already marked `merged` in execution
   state, so historical entries do not block the next batch.
 - `cowp start` without `--task` skips tasks already started, running,
-  worker-succeeded, or merged. `cowp start --task TASK-NNN` remains explicit.
-- `cowp run --all` skips worker-succeeded and merged tasks.
+  worker-succeeded, merged, superseded, or withdrawn. `cowp start --task
+  TASK-NNN` remains explicit, but still reports blockers instead of rerunning
+  non-runnable execution states.
+- `cowp run --all` skips worker-succeeded, merged, superseded, and withdrawn
+  tasks.
 - OpenCode defaults to `--pure`.
 - `run` writes `runs_root/TASK-NNN/effective-prompt.md` with the exact prompt
   sent to OpenCode, including the allowed-file boundary and blocked rule.
@@ -195,7 +198,7 @@ cowp backlog serve `
   --refresh-ms 3000
 ```
 
-Use `--no-open` to disable browser auto-open. v2.2 accepts only loopback hosts:
+Use `--no-open` to disable browser auto-open. `backlog serve` accepts only loopback hosts:
 `127.0.0.1`, `localhost`, and `::1`. The dashboard is read-only and exposes only:
 
 - `/`
