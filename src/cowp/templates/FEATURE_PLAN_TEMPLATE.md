@@ -66,6 +66,8 @@ Kind: `implementation`
 
 Depends on: none
 
+Publish batch: `<optional; for svn_git manual commit boundary>`
+
 Dependency contract:
 
 - `<For upstream tasks: API/schema/helper behavior downstream tasks can rely on>`

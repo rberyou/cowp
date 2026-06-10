@@ -58,6 +58,7 @@ Required output per task:
 - Out-of-scope files
 - Acceptance command
 - Worker prompt summary
+- Optional `publish_batch` for SVN+Git controller-serial work
 
 Tasks can be marked:
 
@@ -114,10 +115,15 @@ A task is ready only when all of these are true:
 - Integration tasks are reserved for controller work that should be done by
   Codex instead of delegated to an OpenCode worker.
 - All open decisions and review findings are resolved.
-- The task branch does not collide with an existing branch: `agent/TASK-NNN` for
-  implementation tasks, or `target_branch` / `integration/TASK-NNN` for
-  integration tasks.
-- The task id does not collide with the configured task worktree path.
+- For `worktree_parallel`, the task branch does not collide with an existing
+  branch: `agent/TASK-NNN` for implementation tasks, or `target_branch` /
+  `integration/TASK-NNN` for integration tasks.
+- For `worktree_parallel`, the task id does not collide with the configured
+  task worktree path.
+- For `controller_serial`, the plan accounts for serial execution and does not
+  rely on parallel task execution.
+- For `svn_git`, related tasks that should be part of one future manual SVN
+  commit share the same `publish_batch`.
 
 Use the machine-readable plan file as the source of truth:
 

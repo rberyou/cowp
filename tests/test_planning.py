@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from cowp.cli import main
-from cowp.config import load_project_config, write_json
+from cowp.config import default_config_data, load_project_config, write_json
 from cowp.planning import export_ready_tasks, load_plan, validate_plan
 from cowp.queries import dependency_mapping_hash
 from cowp.state import StateStore
@@ -579,6 +579,40 @@ def test_plan_validation_rejects_ready_task_when_agent_branch_exists(
     assert any("task branch already exists: agent/TASK-003" in error for error in result.errors)
 
 
+def test_controller_serial_plan_validation_ignores_task_branch_collision(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    cfg = default_config_data(git_repo)
+    cfg["execution"] = {"strategy": "controller_serial", "max_parallel": 1}
+    write_json(workerpool_config, cfg)
+    run(["git", "branch", "agent/TASK-003"], git_repo)
+    path = _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "controller serial branch collision",
+            "status": "ready",
+            "markdown": ".codex-workerpool/plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-003",
+                    "title": "controller task",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                }
+            ],
+        },
+    )
+
+    result = validate_plan(load_project_config(git_repo), load_plan(git_repo, path))
+
+    assert result.ok
+
+
 def test_export_ready_refuses_unmerged_dependency_unless_ignored(
     git_repo: Path,
     workerpool_config: Path,
@@ -852,6 +886,51 @@ def test_plan_next_does_not_count_integration_against_worker_parallel_limit(
     output = capsys.readouterr().out
     assert "TASK-901 runnable" in output
     assert "TASK-001 runnable" in output
+
+
+def test_controller_serial_plan_next_returns_only_one_task(
+    git_repo: Path,
+    workerpool_config: Path,
+    capsys,
+):
+    cfg = default_config_data(git_repo)
+    cfg["execution"] = {"strategy": "controller_serial", "max_parallel": 2}
+    write_json(workerpool_config, cfg)
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "serial tasks",
+            "status": "ready",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "first",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+                {
+                    "id": "TASK-002",
+                    "title": "second",
+                    "status": "ready",
+                    "allowed_files": ["tests/test_example.py"],
+                    "prompt": "WRITE tests/test_example.py",
+                },
+            ],
+        },
+    )
+
+    assert main(["plan", "next", "--repo", str(git_repo), "--all"]) == 0
+
+    output = capsys.readouterr().out
+    assert "TASK-001 runnable" in output
+    assert "TASK-002 runnable" not in output
 
 
 def test_export_ready_runnable_only_does_not_count_integration_against_worker_parallel_limit(

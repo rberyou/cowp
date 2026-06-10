@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from cowp.config import (
+    EXECUTION_CONTROLLER_SERIAL,
+    EXECUTION_WORKTREE_PARALLEL,
     default_config_data,
     load_manifest,
     parse_project_config,
@@ -19,6 +21,42 @@ def test_config_expands_default_roots(git_repo: Path):
     assert config.worktree_root == git_repo.parent / "repo.worktrees"
     assert config.runs_root == git_repo.parent / "repo.runs"
     assert config.setup.command is None
+    assert config.vcs.type == "git"
+    assert config.execution.strategy == EXECUTION_WORKTREE_PARALLEL
+
+
+def test_controller_serial_config_forces_effective_parallelism(git_repo: Path):
+    data = default_config_data(git_repo)
+    data["execution"] = {"strategy": EXECUTION_CONTROLLER_SERIAL, "max_parallel": 5}
+
+    config = parse_project_config(git_repo, data)
+
+    assert config.execution.strategy == EXECUTION_CONTROLLER_SERIAL
+    assert config.execution.max_parallel == 1
+    assert config.max_parallel == 1
+
+
+def test_invalid_execution_strategy_is_rejected(git_repo: Path, workerpool_config: Path, fake_opencode: Path):
+    data = default_config_data(git_repo)
+    data["execution"] = {"strategy": "sideways", "max_parallel": 1}
+    config = parse_project_config(git_repo, data)
+    manifest_path = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "invalid strategy",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    manifest = load_manifest(git_repo, manifest_path)
+
+    result = validate_project(config, manifest)
+
+    assert not result.ok
+    assert any("invalid execution.strategy" in error for error in result.errors)
 
 
 def test_manifest_validation_reports_duplicate_invalid_unknown_and_missing_prompt(

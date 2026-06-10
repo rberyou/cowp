@@ -44,6 +44,18 @@ class TaskState:
     superseded_reason: str | None = None
     superseded_at: str | None = None
     superseded_finding_ids: list[str] | None = None
+    vcs_type: str | None = None
+    execution_strategy: str | None = None
+    controller_branch: str | None = None
+    workspace_path: str | None = None
+    task_start_sha: str | None = None
+    task_commit_sha: str | None = None
+    finish_destination: str | None = None
+    feature_id: str | None = None
+    publish_batch: str | None = None
+    svn_base_revision: str | None = None
+    svn_url: str | None = None
+    git_base_commit: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -75,6 +87,18 @@ class TaskState:
             "superseded_reason": self.superseded_reason,
             "superseded_at": self.superseded_at,
             "superseded_finding_ids": self.superseded_finding_ids or [],
+            "vcs_type": self.vcs_type,
+            "execution_strategy": self.execution_strategy,
+            "controller_branch": self.controller_branch,
+            "workspace_path": self.workspace_path,
+            "task_start_sha": self.task_start_sha,
+            "task_commit_sha": self.task_commit_sha,
+            "finish_destination": self.finish_destination,
+            "feature_id": self.feature_id,
+            "publish_batch": self.publish_batch,
+            "svn_base_revision": self.svn_base_revision,
+            "svn_url": self.svn_url,
+            "git_base_commit": self.git_base_commit,
         }
 
     @classmethod
@@ -110,6 +134,18 @@ class TaskState:
             superseded_finding_ids=list(data["superseded_finding_ids"])
             if isinstance(data.get("superseded_finding_ids"), list)
             else [],
+            vcs_type=data.get("vcs_type"),
+            execution_strategy=data.get("execution_strategy"),
+            controller_branch=data.get("controller_branch"),
+            workspace_path=data.get("workspace_path"),
+            task_start_sha=data.get("task_start_sha"),
+            task_commit_sha=data.get("task_commit_sha"),
+            finish_destination=data.get("finish_destination"),
+            feature_id=data.get("feature_id"),
+            publish_batch=data.get("publish_batch"),
+            svn_base_revision=data.get("svn_base_revision"),
+            svn_url=data.get("svn_url"),
+            git_base_commit=data.get("git_base_commit"),
         )
 
 
