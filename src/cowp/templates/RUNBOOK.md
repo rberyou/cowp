@@ -97,28 +97,50 @@ cowp plan export-ready `
   --runnable-only
 ```
 
-This writes task prompts under the control directory's `tasks/`, updates
-`tasks.json`, and marks exported planning tasks as `exported`.
+This writes implementation task prompts under the control directory's `tasks/`,
+updates `tasks.json`, and marks exported planning tasks as `exported`.
 
 `exported` only means the task entered the execution manifest. It does not mean a
 worktree exists, a worker ran, or the branch merged. Use `cowp status` for
 execution state.
 
-Each task must define:
+Implementation tasks must define:
 
 - `id`
 - `title`
+- `kind`: optional; missing means `implementation`
 - `worker`
 - `prompt_file`
 - `allowed_files`
 - optional `acceptance_command`
 - optional `depends_on`
 
+Integration tasks are Codex-owned controller tasks. They must define:
+
+- `id`
+- `title`
+- `kind`: `integration`
+- `instructions` or `source_branches`
+- optional `base_branch`
+- optional `target_branch`; missing means `integration/TASK-NNN`
+- optional `source_branches` and `merge_order`
+- optional `allowed_files`; empty means unrestricted review scope
+- optional `acceptance_command`
+- optional `depends_on`
+
+Use integration tasks for branch integration, semantic conflict resolution,
+cross-feature consistency passes, or other work Codex should do directly
+instead of delegating to OpenCode.
+
 Draft, review, or blocked tasks must stay in `plans/`.
 
 For dependency chains, export only the next runnable batch. By default,
 `export-ready` refuses to export tasks whose dependencies are not `merged` in the
 execution state.
+
+Integration tasks do not consume worker `max_parallel` capacity in `plan next`
+or `export-ready --runnable-only`. They are still blocked by dependencies, and
+their declared `allowed_files` still participate in overlap checks.
 
 Task dependencies are satisfied only after the upstream task is `merged`.
 `worker_succeeded` means the upstream task needs Codex review; downstream tasks
@@ -155,7 +177,7 @@ Withdrawn manifest entries stay in `tasks.json` for audit, but `start`, `run`,
 and `finish` refuse them. Export replacement tasks with
 `cowp plan export-ready` after the plan validates.
 
-Plan validation rejects ready tasks when `agent/TASK-NNN` or the configured task
+Plan validation rejects ready tasks when the task branch or configured task
 worktree path already exists. Reuse of historical task ids is intentionally
 blocked; choose a new task id or explicitly remove the old branch/worktree.
 
@@ -190,7 +212,34 @@ execution states.
 
 Prepare each worktree with the repository-specific environment setup. `cowp`
 does not create virtual environments, install packages, run CMake, or generate
-language-specific build artifacts.
+language-specific build artifacts unless the project explicitly configures a
+setup command.
+
+Optional project setup lives in `config.json`:
+
+```json
+{
+  "setup": {
+    "command": "& '.\\.venv\\Scripts\\python.exe' -m pip install -e '.[dev]'"
+  }
+}
+```
+
+Run it explicitly after start:
+
+```powershell
+cowp setup --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --task TASK-001
+```
+
+Or run setup immediately for newly created worktrees:
+
+```powershell
+cowp start --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --setup
+```
+
+For integration tasks, `cowp start` creates a Codex-owned branch using
+`target_branch` or `integration/TASK-NNN`. It starts from the task `base_branch`
+when present, otherwise from the repository `base_branch`.
 
 ## 6. Run Workers
 
@@ -203,6 +252,10 @@ With `--all`, `cowp run` skips tasks already marked `worker_succeeded`,
 clear; a downstream task does not run while its upstream dependency is only
 `worker_succeeded`. Historical successful, superseded, or withdrawn tasks can
 remain in `tasks.json` without being rerun.
+
+For integration tasks, `cowp run` does not call OpenCode. It records an audit
+event and leaves the task for Codex to complete manually in the task worktree.
+Run `cowp start` first; `cowp run` fails if the task worktree is missing.
 
 OpenCode runs in pure mode by default. Logs are written under the configured
 `runs_root`. `cowp run` also writes `runs_root/TASK-NNN/effective-prompt.md`,
@@ -228,6 +281,19 @@ cowp review --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --ta
 `runs_root/TASK-NNN/`. New untracked files are included in the review diff. The
 review command also records a snapshot hash; if Codex patches the worktree after
 review, run `cowp review` again before finishing.
+
+For large diffs, use narrower terminal output while still recording the review
+snapshot:
+
+```powershell
+cowp review --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --task TASK-901 --summary
+cowp review --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --task TASK-901 --files
+cowp review --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --task TASK-901 --file src/example.py
+```
+
+For integration tasks, `review` compares the branch and worktree against the
+effective base branch (`task.base_branch` or repository `base_branch`) and also
+prints branch-ahead commits. Worker JSONL logs are not expected.
 
 If Codex finds issues, record them in state:
 
@@ -305,13 +371,34 @@ cowp finish `
   --reviewed-files src/example.py tests/test_example.py
 ```
 
+For integration tasks, Codex performs the work directly in the integration
+worktree, for example by merging `source_branches`, resolving conflicts, and
+running project-specific checks. `finish` still requires explicit
+`--reviewed-files`. When an integration task has empty `allowed_files`, any
+repository path may be reviewed, but every changed path in the integration diff
+must be covered by `--reviewed-files`.
+
+For large integration reviews, write reviewed paths into a pool-relative UTF-8
+line file and pass it with `--reviewed-files-from`. When Codex has reviewed the
+current snapshot as a whole, `--reviewed-all-changed` expands to every changed
+path, but only if the current snapshot hash still matches the latest
+`cowp review`.
+
 `finish` requires review material, refuses stale review snapshots, stages only
-reviewed files, refuses unreviewed changes, runs worker acceptance without
-allowing it to mutate reviewed code, commits the worker branch, and merges with
-`git merge --no-ff --no-commit`. The controller acceptance check runs before the
-merge commit is created; on failure, the merge is aborted and the base branch is
-left unchanged. Finish attempts are recorded in state so a failed merge gate can
-be retried deterministically.
+reviewed files, refuses unreviewed changes, and runs task acceptance without
+allowing it to mutate reviewed code. Implementation tasks are committed by the
+controlled finish step. Integration tasks may already contain reviewed branch
+commits and can finish from a clean worktree when the branch is ahead of its
+effective base branch.
+
+For implementation tasks, the controller acceptance check runs inside
+`git merge --no-ff --no-commit` before the merge commit is created; on failure,
+the merge is aborted and the base branch is left unchanged. For integration
+tasks, `target_branch` is the integration result branch. `finish` runs
+controller acceptance in the integration worktree, records the task as `merged`
+for dependency tracking, and does not merge the integration branch back into the
+repository `base_branch`. Finish attempts are recorded in state so a failed gate
+can be retried deterministically.
 
 ## 8. Refresh Local Workflow Files
 

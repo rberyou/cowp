@@ -29,6 +29,8 @@ class TaskState:
     review_diff_path: str | None = None
     final_diff_path: str | None = None
     reviewed_files: list[str] | None = None
+    setup_command: str | None = None
+    setup_exit_code: int | None = None
     worker_acceptance_command: str | None = None
     worker_acceptance_exit_code: int | None = None
     main_acceptance_command: str | None = None
@@ -58,6 +60,8 @@ class TaskState:
             "review_diff_path": self.review_diff_path,
             "final_diff_path": self.final_diff_path,
             "reviewed_files": self.reviewed_files,
+            "setup_command": self.setup_command,
+            "setup_exit_code": self.setup_exit_code,
             "worker_acceptance_command": self.worker_acceptance_command,
             "worker_acceptance_exit_code": self.worker_acceptance_exit_code,
             "main_acceptance_command": self.main_acceptance_command,
@@ -89,6 +93,8 @@ class TaskState:
             review_diff_path=data.get("review_diff_path"),
             final_diff_path=data.get("final_diff_path"),
             reviewed_files=list(data["reviewed_files"]) if isinstance(data.get("reviewed_files"), list) else None,
+            setup_command=data.get("setup_command"),
+            setup_exit_code=data.get("setup_exit_code"),
             worker_acceptance_command=data.get("worker_acceptance_command"),
             worker_acceptance_exit_code=data.get("worker_acceptance_exit_code"),
             main_acceptance_command=data.get("main_acceptance_command"),

@@ -812,6 +812,105 @@ def test_export_ready_all_exports_independent_features_with_feature_id(
     ]
 
 
+def test_plan_next_does_not_count_integration_against_worker_parallel_limit(
+    git_repo: Path,
+    workerpool_config: Path,
+    capsys,
+):
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "mixed execution",
+            "status": "ready",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-901",
+                    "kind": "integration",
+                    "title": "integrate completed branches",
+                    "status": "ready",
+                    "instructions": "Merge completed feature branches and verify consistency.",
+                },
+                {
+                    "id": "TASK-001",
+                    "title": "worker implementation",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+            ],
+        },
+    )
+
+    assert main(["plan", "next", "--repo", str(git_repo), "--all", "--max-parallel", "1"]) == 0
+
+    output = capsys.readouterr().out
+    assert "TASK-901 runnable" in output
+    assert "TASK-001 runnable" in output
+
+
+def test_export_ready_runnable_only_does_not_count_integration_against_worker_parallel_limit(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "mixed execution",
+            "status": "ready",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-901",
+                    "kind": "integration",
+                    "title": "integrate completed branches",
+                    "status": "ready",
+                    "instructions": "Merge completed feature branches and verify consistency.",
+                },
+                {
+                    "id": "TASK-001",
+                    "title": "worker implementation",
+                    "status": "ready",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                },
+            ],
+        },
+    )
+
+    assert (
+        main(
+            [
+                "plan",
+                "export-ready",
+                "--repo",
+                str(git_repo),
+                "--all",
+                "--runnable-only",
+                "--manifest",
+                "tasks.json",
+            ]
+        )
+        == 0
+    )
+
+    manifest = json.loads((git_repo / ".codex-workerpool" / "tasks.json").read_text(encoding="utf-8"))
+    assert [(task["id"], task["kind"]) for task in manifest["tasks"]] == [
+        ("TASK-901", "integration"),
+        ("TASK-001", "implementation"),
+    ]
+
+
 def test_export_ready_feature_runnable_only_respects_completed_feature_dependency(
     git_repo: Path,
     workerpool_config: Path,
@@ -1512,6 +1611,50 @@ def test_validate_errors_on_replacement_state_consistency_blocker(
 
     assert main(["validate", "--repo", str(git_repo), "--manifest", ".codex-workerpool/tasks.json"]) == 1
     assert "consistency: TASK-001 has replacement metadata" in capsys.readouterr().err
+
+
+def test_export_ready_preserves_integration_metadata_without_prompt_file(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    path = _write_plan(
+        git_repo,
+        {
+            "feature_id": "FEATURE-001",
+            "title": "integration feature",
+            "status": "ready",
+            "markdown": ".codex-workerpool/plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "tasks": [
+                {
+                    "id": "TASK-901",
+                    "kind": "integration",
+                    "title": "codex integration",
+                    "status": "ready",
+                    "target_branch": "integration/TASK-901",
+                    "instructions": "Integrate completed branches and verify consistency.",
+                    "allowed_files": [],
+                }
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    plan = load_plan(git_repo, path)
+
+    result = validate_plan(config, plan)
+    assert result.ok
+
+    exported = export_ready_tasks(config, plan, ".codex-workerpool/tasks.json")
+
+    assert exported == ["TASK-901"]
+    manifest = json.loads((git_repo / ".codex-workerpool" / "tasks.json").read_text(encoding="utf-8"))
+    task = manifest["tasks"][0]
+    assert task["kind"] == "integration"
+    assert task["target_branch"] == "integration/TASK-901"
+    assert "instructions" in task
+    assert "prompt_file" not in task
+    assert not (git_repo / ".codex-workerpool" / "tasks" / "TASK-901.md").exists()
 
 
 def _write_plan(repo: Path, data: dict) -> Path:

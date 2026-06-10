@@ -140,6 +140,8 @@ def test_dashboard_html_uses_boot_script_without_embedding_user_data():
     assert "innerHTML" not in html
     assert "task.depends_on" in html
     assert "task.blockers" in html
+    assert "task.integration_result" in html
+    assert "task.setup_command" in html
 
 
 def _get(url: str) -> dict[str, str | int]:

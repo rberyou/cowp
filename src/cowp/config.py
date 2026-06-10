@@ -11,6 +11,9 @@ from cowp.state import StateStore
 
 TASK_ID_RE = re.compile(r"^TASK-\d{3,}$")
 MERGED_STATE = "merged"
+TASK_KIND_IMPLEMENTATION = "implementation"
+TASK_KIND_INTEGRATION = "integration"
+TASK_KINDS = {TASK_KIND_IMPLEMENTATION, TASK_KIND_INTEGRATION}
 
 
 class ConfigError(ValueError):
@@ -27,6 +30,11 @@ class OpencodeConfig:
 class AcceptanceConfig:
     worker: str | None = None
     main: str | None = None
+
+
+@dataclass(frozen=True)
+class SetupConfig:
+    command: str | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +57,7 @@ class ProjectConfig:
     max_parallel: int
     opencode: OpencodeConfig
     acceptance: AcceptanceConfig
+    setup: SetupConfig
     workers: dict[str, WorkerProfile]
 
 
@@ -56,11 +65,17 @@ class ProjectConfig:
 class ManifestTask:
     id: str
     title: str
+    kind: str
     worker: str | None
-    prompt_file: Path
+    prompt_file: Path | None
     allowed_files: tuple[str, ...]
     feature_id: str | None = None
     acceptance_command: str | None = None
+    base_branch: str | None = None
+    target_branch: str | None = None
+    source_branches: tuple[str, ...] = ()
+    merge_order: tuple[str, ...] = ()
+    instructions: str | None = None
     depends_on: tuple[str, ...] = ()
     declared_depends_on: tuple[str, ...] = ()
     effective_depends_on: tuple[str, ...] = ()
@@ -110,6 +125,9 @@ def default_config_data(repo: Path, external_pool: bool = False) -> dict[str, An
         "acceptance": {
             "worker": None,
             "main": None,
+        },
+        "setup": {
+            "command": None,
         },
         "workers": [
             {
@@ -184,6 +202,7 @@ def parse_project_config(
 
     opencode_data = data.get("opencode") or {}
     acceptance_data = data.get("acceptance") or {}
+    setup_data = data.get("setup") or {}
 
     default_worktree_root = "../{repo_name}.worktrees" if legacy_layout else "worktrees"
     default_runs_root = "../{repo_name}.runs" if legacy_layout else "runs"
@@ -204,6 +223,9 @@ def parse_project_config(
         acceptance=AcceptanceConfig(
             worker=_optional_str(acceptance_data.get("worker")),
             main=_optional_str(acceptance_data.get("main")),
+        ),
+        setup=SetupConfig(
+            command=_optional_str(setup_data.get("command")),
         ),
         workers=workers,
     )
@@ -227,10 +249,15 @@ def load_manifest(config_or_repo: ProjectConfig | Path, manifest_path: str | Pat
     for raw in tasks_data:
         task_id = str(raw.get("id") or "").strip()
         title = str(raw.get("title") or task_id).strip() or task_id
+        kind = _task_kind(raw.get("kind"))
         prompt_raw = raw.get("prompt_file")
-        if not prompt_raw:
+        if kind == TASK_KIND_IMPLEMENTATION and not prompt_raw:
             raise ConfigError(f"{task_id or '<missing id>'}: prompt_file is required")
+        prompt_file = prompt_resolver(prompt_raw) if prompt_raw else None
         allowed_files = tuple(str(p).replace("\\", "/") for p in raw.get("allowed_files") or ())
+        source_branches = _str_tuple(raw.get("source_branches") or ())
+        merge_order_raw = raw.get("merge_order")
+        merge_order = _str_tuple(merge_order_raw) if merge_order_raw is not None else source_branches
         dependency_metadata_present = any(
             key in raw
             for key in (
@@ -252,11 +279,17 @@ def load_manifest(config_or_repo: ProjectConfig | Path, manifest_path: str | Pat
             ManifestTask(
                 id=task_id,
                 title=title,
+                kind=kind,
                 worker=_optional_str(raw.get("worker")),
-                prompt_file=prompt_resolver(prompt_raw),
+                prompt_file=prompt_file,
                 allowed_files=allowed_files,
                 feature_id=_optional_str(raw.get("feature_id")),
                 acceptance_command=_optional_str(raw.get("acceptance_command")),
+                base_branch=_optional_str(raw.get("base_branch")),
+                target_branch=_optional_str(raw.get("target_branch")),
+                source_branches=source_branches,
+                merge_order=merge_order,
+                instructions=_optional_str(raw.get("instructions")),
                 depends_on=depends_on,
                 declared_depends_on=declared_depends_on,
                 effective_depends_on=effective_depends_on,
@@ -285,23 +318,28 @@ def validate_project(config: ProjectConfig, manifest: Manifest) -> ValidationRes
         result.errors.append("base_branch is required")
     if not config.workers:
         result.errors.append("at least one worker profile is required")
-    if shutil.which("opencode") is None:
+    if any(is_implementation_task(task) for task in manifest.tasks) and shutil.which("opencode") is None:
         result.errors.append("opencode executable was not found on PATH")
 
     seen: set[str] = set()
     for task in manifest.tasks:
         if not TASK_ID_RE.match(task.id):
             result.errors.append(f"invalid task id: {task.id}")
+        if task.kind not in TASK_KINDS:
+            result.errors.append(f"{task.id}: invalid task kind '{task.kind}'")
         if task.id in seen:
             result.errors.append(f"duplicate task id: {task.id}")
         seen.add(task.id)
-        worker_id = task.worker or "default"
-        if worker_id not in config.workers:
-            result.errors.append(f"{task.id}: unknown worker '{worker_id}'")
-        if not task.prompt_file.is_file():
-            result.errors.append(f"{task.id}: prompt file not found: {task.prompt_file}")
-        if not task.allowed_files:
-            result.warnings.append(f"{task.id}: allowed_files is empty")
+        if is_implementation_task(task):
+            worker_id = task.worker or "default"
+            if worker_id not in config.workers:
+                result.errors.append(f"{task.id}: unknown worker '{worker_id}'")
+            if not task.prompt_file or not task.prompt_file.is_file():
+                result.errors.append(f"{task.id}: prompt file not found: {task.prompt_file}")
+            if not task.allowed_files:
+                result.warnings.append(f"{task.id}: allowed_files is empty")
+        elif is_integration_task(task):
+            _validate_integration_task(config, task, result)
         for dep in {*task.declared_depends_on, *task.effective_depends_on}:
             if dep not in seen and not any(other.id == dep for other in manifest.tasks):
                 result.errors.append(f"{task.id}: unknown dependency '{dep}'")
@@ -311,6 +349,7 @@ def validate_project(config: ProjectConfig, manifest: Manifest) -> ValidationRes
         task
         for task in manifest.tasks
         if task.id not in merged_task_ids and task.active and not task.withdrawn
+        if is_implementation_task(task) or task.allowed_files
     ]
     for left, right in overlapping_task_pairs(active_tasks):
         result.warnings.append(f"{left.id} and {right.id} have overlapping allowed_files")
@@ -339,14 +378,36 @@ def paths_overlap(left_paths: Iterable[str], right_paths: Iterable[str]) -> bool
 
 
 def prompt_text(task: ManifestTask) -> str:
+    if not task.prompt_file:
+        raise ConfigError(f"{task.id}: prompt_file is required for implementation tasks")
     return task.prompt_file.read_text(encoding="utf-8")
 
 
 def worker_for_task(config: ProjectConfig, task: ManifestTask) -> WorkerProfile:
+    if is_integration_task(task):
+        raise ConfigError(f"{task.id}: integration tasks do not use worker profiles")
     worker_id = task.worker or "default"
     if worker_id not in config.workers:
         raise ConfigError(f"{task.id}: unknown worker '{worker_id}'")
     return config.workers[worker_id]
+
+
+def is_implementation_task(task: ManifestTask) -> bool:
+    return task.kind == TASK_KIND_IMPLEMENTATION
+
+
+def is_integration_task(task: ManifestTask) -> bool:
+    return task.kind == TASK_KIND_INTEGRATION
+
+
+def task_target_branch(task: ManifestTask) -> str:
+    if is_integration_task(task):
+        return task.target_branch or f"integration/{task.id}"
+    return f"agent/{task.id}"
+
+
+def task_effective_base_branch(config: ProjectConfig, task: ManifestTask) -> str:
+    return task.base_branch or config.base_branch
 
 
 def current_branch(repo: Path) -> str | None:
@@ -401,6 +462,53 @@ def _optional_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _task_kind(value: Any) -> str:
+    return _optional_str(value) or TASK_KIND_IMPLEMENTATION
+
+
+def _str_tuple(value: Iterable[Any]) -> tuple[str, ...]:
+    if isinstance(value, str):
+        value = (value,)
+    return tuple(str(item).strip() for item in value if str(item).strip())
+
+
+def _validate_integration_task(config: ProjectConfig, task: ManifestTask, result: ValidationResult) -> None:
+    if task.worker:
+        result.warnings.append(f"{task.id}: integration task ignores worker '{task.worker}'")
+    if task.prompt_file:
+        result.warnings.append(f"{task.id}: integration task ignores prompt_file")
+    if not task.instructions and not task.source_branches:
+        result.errors.append(f"{task.id}: integration task requires instructions or source_branches")
+    if len(set(task.merge_order)) != len(task.merge_order):
+        result.errors.append(f"{task.id}: integration merge_order contains duplicates")
+    unknown_merge = [branch for branch in task.merge_order if branch not in set(task.source_branches)]
+    if unknown_merge:
+        result.errors.append(
+            f"{task.id}: merge_order branches must be listed in source_branches: {', '.join(unknown_merge)}"
+        )
+    effective_base = task_effective_base_branch(config, task)
+    refs = [("base_branch", effective_base), *[("source_branches", ref) for ref in task.source_branches]]
+    for label, ref in refs:
+        if not _git_ref_exists(config.repo, ref):
+            result.errors.append(f"{task.id}: {label} ref not found: {ref}")
+    target = task_target_branch(task)
+    if target == effective_base or target in set(task.source_branches):
+        result.errors.append(f"{task.id}: target_branch must not match base_branch or source_branches")
+
+
+def _git_ref_exists(repo: Path, ref: str) -> bool:
+    import subprocess
+
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", ref],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+    )
+    return proc.returncode == 0
 
 
 def _normalize_allowed_path(path: str) -> str:

@@ -400,6 +400,8 @@ def dashboard_html(refresh_ms: int) -> str:
       const root = el('div', 'task');
       const main = el('div', 'task-main');
       main.appendChild(el('span', '', task.task_id + ' ' + task.title));
+      main.appendChild(el('span', 'badge', task.kind || 'implementation'));
+      main.appendChild(el('span', 'badge', task.executor || 'worker'));
       main.appendChild(el('span', 'badge ' + text(task.execution_status), task.execution_status));
       root.appendChild(main);
       const grid = el('div', 'task-grid');
@@ -410,8 +412,12 @@ def dashboard_html(refresh_ms: int) -> str:
       const reviewFindings = (task.review_findings || []).join('; ');
       const withdrawnReplacements = (task.withdrawn_replacement_tasks || []).join(', ');
       const replacementChain = (task.replacement_chain || []).join(' -> ');
+      const sourceBranches = (task.source_branches || []).join(', ');
+      const mergeOrder = (task.merge_order || []).join(', ');
       const pairs = [
         ['plan', task.plan_status],
+        ['kind', task.kind],
+        ['executor', task.executor],
         ['depends_on', dependsOn],
         ['declared_depends_on', declaredDependsOn],
         ['effective_depends_on', effectiveDependsOn],
@@ -425,9 +431,18 @@ def dashboard_html(refresh_ms: int) -> str:
         ['withdrawn_reason', task.withdrawn_reason],
         ['withdrawn_replacements', withdrawnReplacements],
         ['worker', task.worker],
+        ['base_branch', task.base_branch],
+        ['target_branch', task.target_branch],
+        ['integration_result', task.integration_result],
+        ['finish_destination', task.finish_destination],
+        ['source_branches', sourceBranches],
+        ['merge_order', mergeOrder],
+        ['branch_ahead', task.branch_ahead_count],
         ['branch', task.branch],
         ['worktree', task.worktree],
         ['exit', task.exit_code],
+        ['setup_exit', task.setup_exit_code],
+        ['setup', task.setup_command],
         ['allowed', task.allowed_files_count],
         ['log', task.log_path],
         ['review', task.review_diff_path],

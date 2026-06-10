@@ -7,7 +7,13 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from cowp.config import ManifestTask, ProjectConfig
+from cowp.config import (
+    ManifestTask,
+    ProjectConfig,
+    is_integration_task,
+    task_effective_base_branch,
+    task_target_branch,
+)
 
 
 class GitError(RuntimeError):
@@ -83,6 +89,10 @@ def task_branch(task_id: str) -> str:
     return f"agent/{task_id}"
 
 
+def branch_for_task(task: ManifestTask) -> str:
+    return task_target_branch(task)
+
+
 def task_worktree(config: ProjectConfig, task_id: str) -> Path:
     return config.worktree_root / task_id
 
@@ -109,7 +119,7 @@ def create_worktree(config: ProjectConfig, task: ManifestTask, skip_clean_check:
     worktree = task_worktree(config, task.id)
     if worktree.exists():
         raise GitError(f"task worktree already exists: {worktree}")
-    branch = task_branch(task.id)
+    branch = branch_for_task(task)
     if branch_exists(config, branch):
         raise GitError(
             f"task branch already exists: {branch}; choose a new task id or remove the old branch"
@@ -125,7 +135,7 @@ def create_worktree(config: ProjectConfig, task: ManifestTask, skip_clean_check:
             "-b",
             branch,
             str(worktree),
-            config.base_branch,
+            task_effective_base_branch(config, task),
         ]
     )
     return worktree
@@ -187,6 +197,105 @@ def task_snapshot_hash(worktree: Path) -> str:
     return digest.hexdigest()
 
 
+def task_review_base_sha(config: ProjectConfig, task: ManifestTask, worktree: Path) -> str:
+    if is_integration_task(task):
+        return merge_base_sha(config, task_effective_base_branch(config, task), head_sha(worktree))
+    return head_sha(worktree)
+
+
+def task_review_diff_stat(config: ProjectConfig, task: ManifestTask, worktree: Path) -> str:
+    if is_integration_task(task):
+        return task_diff_stat_from_base(worktree, task_review_base_sha(config, task, worktree))
+    return task_diff_stat(worktree)
+
+
+def task_review_diff(config: ProjectConfig, task: ManifestTask, worktree: Path) -> str:
+    if is_integration_task(task):
+        return task_diff_from_base(worktree, task_review_base_sha(config, task, worktree))
+    return task_diff(worktree)
+
+
+def task_review_diff_for_paths(
+    config: ProjectConfig,
+    task: ManifestTask,
+    worktree: Path,
+    paths: list[str],
+) -> str:
+    normalized_paths = [path.replace("\\", "/").strip("/") for path in paths if path.strip()]
+    if not normalized_paths:
+        return task_review_diff(config, task, worktree)
+    base_args = [task_review_base_sha(config, task, worktree)] if is_integration_task(task) else ["HEAD"]
+    tracked = run_text(["git", "-C", str(worktree), "diff", *base_args, "--", *normalized_paths])
+    untracked = set(_untracked_files(worktree))
+    untracked_parts = [
+        _untracked_file_diff(worktree, rel_path)
+        for rel_path in normalized_paths
+        if rel_path in untracked
+    ]
+    parts = [part.rstrip() for part in [tracked, *untracked_parts] if part.strip()]
+    return "\n\n".join(parts) + ("\n" if parts else "")
+
+
+def task_review_snapshot_hash(config: ProjectConfig, task: ManifestTask, worktree: Path) -> str:
+    if is_integration_task(task):
+        return task_snapshot_hash_from_base(worktree, task_review_base_sha(config, task, worktree))
+    return task_snapshot_hash(worktree)
+
+
+def task_branch_ahead_commits(config: ProjectConfig, task: ManifestTask, worktree: Path) -> tuple[str, ...]:
+    base_sha = task_review_base_sha(config, task, worktree)
+    return commit_range(config, base_sha, head_sha(worktree))
+
+
+def task_changed_files_for_review(config: ProjectConfig, task: ManifestTask, worktree: Path) -> set[str]:
+    if is_integration_task(task):
+        return changed_files_from_base(worktree, task_review_base_sha(config, task, worktree))
+    return changed_files(worktree)
+
+
+def task_diff_stat_from_base(worktree: Path, base_sha: str) -> str:
+    tracked = run_text(["git", "-C", str(worktree), "diff", base_sha, "--stat"])
+    untracked = _untracked_files(worktree)
+    if not untracked:
+        return tracked
+    lines = [tracked.rstrip()] if tracked.strip() else []
+    for rel_path in untracked:
+        lines.append(_untracked_stat_line(worktree, rel_path))
+    return "\n".join(line for line in lines if line)
+
+
+def task_diff_from_base(worktree: Path, base_sha: str) -> str:
+    tracked = run_text(["git", "-C", str(worktree), "diff", base_sha])
+    untracked = [_untracked_file_diff(worktree, rel_path) for rel_path in _untracked_files(worktree)]
+    parts = [part.rstrip() for part in [tracked, *untracked] if part.strip()]
+    return "\n\n".join(parts) + ("\n" if parts else "")
+
+
+def task_snapshot_hash_from_base(worktree: Path, base_sha: str) -> str:
+    status = task_status(worktree)
+    diff = task_diff_from_base(worktree, base_sha)
+    digest = hashlib.sha256()
+    digest.update(b"cowp-task-snapshot-v2\0")
+    digest.update(base_sha.encode("utf-8", errors="replace"))
+    digest.update(b"\0")
+    digest.update(status.encode("utf-8", errors="replace"))
+    digest.update(b"\0")
+    digest.update(diff.encode("utf-8", errors="replace"))
+    return digest.hexdigest()
+
+
+def changed_files(worktree: Path) -> set[str]:
+    tracked = run_text(["git", "-C", str(worktree), "diff", "--name-only", "HEAD"]).splitlines()
+    untracked = _untracked_files(worktree)
+    return {path.replace("\\", "/") for path in tracked + untracked if path.strip()}
+
+
+def changed_files_from_base(worktree: Path, base_sha: str) -> set[str]:
+    tracked = run_text(["git", "-C", str(worktree), "diff", "--name-only", base_sha]).splitlines()
+    untracked = _untracked_files(worktree)
+    return {path.replace("\\", "/") for path in tracked + untracked if path.strip()}
+
+
 def run_acceptance(command: str, cwd: Path) -> int:
     if not command:
         return 0
@@ -222,15 +331,38 @@ def finish_task(
     if not worktree.exists():
         raise GitError(f"task worktree does not exist: {worktree}")
 
-    branch = task_branch(task.id)
+    branch = branch_for_task(task)
     branch_head_before_finish = head_sha(worktree)
-    base_commit_sha = merge_base_sha(config, config.base_branch, branch_head_before_finish)
+    base_commit_sha = merge_base_sha(config, task_effective_base_branch(config, task), branch_head_before_finish)
     worker_acceptance_exit_code = None
     main_acceptance_exit_code = None
     if acceptance_command:
         worker_acceptance_exit_code = run_acceptance(acceptance_command, worktree)
 
-    if reusable_task_commit_sha:
+    if is_integration_task(task):
+        if expected_snapshot_hash and task_snapshot_hash_from_base(worktree, base_commit_sha) != expected_snapshot_hash:
+            raise GitError("review snapshot is stale; run cowp review again")
+        parent_task_commit_sha = None
+        branch_changes = commit_range(config, base_commit_sha, branch_head_before_finish)
+        uncommitted = changed_files(worktree)
+        if uncommitted:
+            parent_task_commit_sha = branch_head_before_finish
+            git_task(worktree, "add", "--", *reviewed_files)
+            remaining_tracked = run_text(["git", "-C", str(worktree), "diff", "--name-only"]).splitlines()
+            remaining_untracked = run_text(
+                ["git", "-C", str(worktree), "ls-files", "--others", "--exclude-standard"]
+            ).splitlines()
+            remaining = [item for item in remaining_tracked + remaining_untracked if item]
+            if remaining:
+                raise GitError(f"unreviewed changes remain: {', '.join(remaining)}")
+            quiet = subprocess.run(["git", "-C", str(worktree), "diff", "--cached", "--quiet"], text=True)
+            if quiet.returncode != 0:
+                git_task(worktree, "commit", "-m", commit_message)
+        task_commit_sha = head_sha(worktree)
+        if not branch_changes and task_commit_sha == base_commit_sha:
+            raise GitError("no integration changes to merge")
+        reused_task_commit = False
+    elif reusable_task_commit_sha:
         if task_status(worktree).strip():
             raise GitError("recorded finish retry requires a clean task worktree")
         if branch_head_before_finish != reusable_task_commit_sha:
@@ -270,6 +402,57 @@ def finish_task(
         review_snapshot_hash=expected_snapshot_hash,
         reused_task_commit=reused_task_commit,
     )
+    if is_integration_task(task):
+        integration_snapshot = task_snapshot_hash_from_base(worktree, base_commit_sha)
+        integration_untracked = set(_untracked_files(worktree))
+        try:
+            if main_acceptance_command:
+                main_acceptance_exit_code = run_acceptance(main_acceptance_command, worktree)
+                if task_snapshot_hash_from_base(worktree, base_commit_sha) != integration_snapshot:
+                    failed = FinishResult(
+                        worker_acceptance_exit_code=worker_acceptance_exit_code,
+                        main_acceptance_exit_code=main_acceptance_exit_code,
+                        base_commit_sha=base_commit_sha,
+                        parent_task_commit_sha=parent_task_commit_sha,
+                        task_commit_sha=task_commit_sha,
+                        covered_commit_range=covered,
+                        review_snapshot_hash=expected_snapshot_hash,
+                        merge_commit_sha=task_commit_sha,
+                        reused_task_commit=reused_task_commit,
+                    )
+                    restore_error = _cleanup_acceptance_mutation(worktree, integration_untracked)
+                    raise FinishError(
+                        _with_restore_error("integration acceptance mutated the task worktree", restore_error),
+                        failed,
+                    )
+        except AcceptanceError as exc:
+            failed = FinishResult(
+                worker_acceptance_exit_code=worker_acceptance_exit_code,
+                main_acceptance_exit_code=exc.exit_code,
+                base_commit_sha=base_commit_sha,
+                parent_task_commit_sha=parent_task_commit_sha,
+                task_commit_sha=task_commit_sha,
+                covered_commit_range=covered,
+                review_snapshot_hash=expected_snapshot_hash,
+                merge_commit_sha=task_commit_sha,
+                reused_task_commit=reused_task_commit,
+            )
+            raise FinishError(str(exc), failed) from exc
+
+        if not keep_worktree:
+            run_checked(["git", "-C", str(config.repo), "worktree", "remove", "--force", str(worktree)])
+        return FinishResult(
+            worker_acceptance_exit_code=worker_acceptance_exit_code,
+            main_acceptance_exit_code=main_acceptance_exit_code,
+            base_commit_sha=base_commit_sha,
+            parent_task_commit_sha=parent_task_commit_sha,
+            task_commit_sha=task_commit_sha,
+            covered_commit_range=covered,
+            review_snapshot_hash=expected_snapshot_hash,
+            merge_commit_sha=task_commit_sha,
+            reused_task_commit=reused_task_commit,
+        )
+
     git(config, "checkout", config.base_branch)
 
     try:
@@ -373,8 +556,12 @@ def _abort_merge(config: ProjectConfig) -> str | None:
 
 
 def _restore_worktree_from_index(config: ProjectConfig) -> str | None:
+    return _restore_path_from_index(config.repo)
+
+
+def _restore_path_from_index(worktree: Path) -> str | None:
     checkout = subprocess.run(
-        ["git", "-C", str(config.repo), "checkout-index", "-f", "-a"],
+        ["git", "-C", str(worktree), "checkout-index", "-f", "-a"],
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -408,15 +595,19 @@ def _clear_merge_state_to_head(config: ProjectConfig) -> str | None:
 
 
 def _cleanup_main_acceptance_mutation(config: ProjectConfig, baseline_untracked: set[str]) -> str | None:
+    return _cleanup_acceptance_mutation(config.repo, baseline_untracked)
+
+
+def _cleanup_acceptance_mutation(worktree: Path, baseline_untracked: set[str]) -> str | None:
     errors: list[str] = []
-    restore_error = _restore_worktree_from_index(config)
+    restore_error = _restore_path_from_index(worktree)
     if restore_error:
         errors.append(restore_error)
-    current_untracked = set(_untracked_files(config.repo))
+    current_untracked = set(_untracked_files(worktree))
     for rel_path in sorted(current_untracked - baseline_untracked):
-        path = (config.repo / rel_path).resolve()
+        path = (worktree / rel_path).resolve()
         try:
-            path.relative_to(config.repo.resolve())
+            path.relative_to(worktree.resolve())
         except ValueError:
             errors.append(f"refusing to remove unexpected untracked path: {path}")
             continue
@@ -437,9 +628,14 @@ def _with_abort_error(message: str, abort_error: str | None) -> str:
 
 
 def _with_restore_abort_error(message: str, restore_error: str | None, abort_error: str | None) -> str:
-    if restore_error:
-        message = f"{message}\nmerge snapshot restore failed: {restore_error}"
+    message = _with_restore_error(message, restore_error)
     return _with_abort_error(message, abort_error)
+
+
+def _with_restore_error(message: str, restore_error: str | None) -> str:
+    if restore_error:
+        message = f"{message}\nacceptance snapshot restore failed: {restore_error}"
+    return message
 
 
 def _untracked_files(worktree: Path) -> list[str]:

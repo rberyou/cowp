@@ -12,6 +12,14 @@ The workflow has two layers:
 - Execution layer: only ready tasks are copied into the control directory's
   `tasks.json` and run by `cowp`.
 
+Execution tasks have two kinds:
+
+- `implementation`: the default, delegated to an OpenCode worker.
+- `integration`: Codex-owned work that uses the same start/review/finish gates
+  but is not delegated to OpenCode. Use it for branch integration, semantic
+  conflict resolution, cross-feature consistency passes, or other controller
+  work that needs Codex judgment.
+
 WorkerPool can run in two layouts:
 
 - External pool layout, recommended for production:
@@ -61,6 +69,7 @@ Validate and run the exported manifest:
 ```powershell
 cowp validate --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json
 cowp start --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json
+cowp setup --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001
 cowp run --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --all --max-parallel 2
 ```
 
@@ -86,6 +95,14 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
 ## Model
 
 - One task maps to one branch and one worktree.
+- Missing `kind` means `implementation`, preserving old manifests.
+- `implementation` tasks use `agent/TASK-NNN`, require `prompt_file` and
+  `allowed_files`, participate in worker concurrency, and are executed by
+  `cowp run`.
+- `integration` tasks use `target_branch` or `integration/TASK-NNN`, do not
+  require `worker`, `prompt_file`, or `allowed_files`, and are performed by
+  Codex in the task worktree. `cowp run` records that the OpenCode worker step
+  was skipped after the task worktree has been created.
 - A task should enter the manifest only after the planning Review Gate and Ready
   Gate pass.
 - `cowp plan export-ready` is the only normal path from planning into execution.
@@ -96,9 +113,13 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
 - Features may depend on other features with `depends_on_features`; those
   dependencies use query-layer feature completion, normally explicit
   `status: done` or all upstream tasks merged.
-- Plan validation rejects ready tasks when `agent/TASK-NNN` or the configured
-  task worktree path already exists. Choose a fresh task id or explicitly clean
-  up the old branch/worktree before export.
+- Plan validation rejects ready tasks when the task branch or configured task
+  worktree path already exists. Choose a fresh task id or explicitly clean up
+  the old branch/worktree before export.
+- Project-specific environment setup is configured with `setup.command` in
+  `config.json` and run explicitly with `cowp setup`, or immediately after
+  `cowp start` with `--setup`. WorkerPool does not assume Python, Node, C++, or
+  any fixed project environment.
 - `cowp backlog status` prints a Kanban-style overview with derived `Clarify`,
   running, failed, review-needed, review-blocked, blocked, and merged columns.
 - `cowp backlog serve` starts a local read-only dashboard at
@@ -112,6 +133,10 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
   `runs_root/state.json`.
 - Multiple OpenCode workers may run concurrently when their `allowed_files` do
   not overlap and their dependencies are satisfied.
+- Integration tasks do not consume worker profile capacity or `max_parallel`
+  worker slots in planning/export batch selection. If they declare
+  `allowed_files`, those paths are still shown and validated as review scope;
+  an empty `allowed_files` list means unrestricted review scope, not "no files".
 - Task dependencies are satisfied only by execution state `merged`.
   `worker_succeeded` means the task is waiting for Codex review and does not
   unlock downstream tasks.
@@ -144,16 +169,28 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
 - `review` writes `runs_root/TASK-NNN/review.diff` so Codex review material is
   reproducible, including untracked new files. It also records a review snapshot
   hash used by `finish`.
+- `review --summary`, `review --files`, and repeated `review --file <path>`
+  reduce terminal output for large diffs while still recording the same review
+  snapshot and diff files under `runs_root`.
 - `cowp finding add/update/resolve` records execution review findings in
   `runs_root/state.json`. Open findings block `finish`; boundary and
   `contract_change` findings remain non-mergeable until reclassified or marked
   invalid with audit evidence.
 - `finish` requires review material, refuses stale review snapshots, stages only
-  reviewed files, refuses unreviewed changes, and rejects worker/manual commits
-  made before the controlled finish step.
-- `finish` runs the controller acceptance inside a `git merge --no-ff
-  --no-commit` transaction and creates the merge commit only after acceptance
-  passes.
+  reviewed files, and refuses unreviewed changes. Implementation tasks reject
+  worker/manual commits made before the controlled finish step. Integration
+  tasks may already contain reviewed branch commits and can finish from a clean
+  worktree when the branch is ahead of its effective base branch.
+- `finish --reviewed-files-from <file>` reads reviewed paths from a pool-relative
+  UTF-8 line file. `finish --reviewed-all-changed` expands to every changed path
+  only when the current worktree still matches the latest review snapshot.
+- For implementation tasks, `finish` runs the controller acceptance inside a
+  `git merge --no-ff --no-commit` transaction and creates the merge commit only
+  after acceptance passes.
+- For integration tasks, `finish` treats `target_branch` as the integration
+  result branch. It runs controller acceptance in the integration worktree,
+  records the task as `merged` for dependency tracking, and does not merge the
+  integration branch back into the repository `base_branch`.
 - `finish` records reviewed files, final diff snapshot, acceptance command
   results, and finish attempts in `runs_root/state.json`.
 - Worker merge is intentionally serial and controlled by Codex.

@@ -9,6 +9,9 @@ from cowp.config import (
     ConfigError,
     ProjectConfig,
     TASK_ID_RE,
+    TASK_KIND_IMPLEMENTATION,
+    TASK_KIND_INTEGRATION,
+    TASK_KINDS,
     ValidationResult,
     load_json,
     paths_overlap,
@@ -56,10 +59,16 @@ class PlanTask:
     id: str
     title: str
     status: str
+    kind: str
     worker: str | None
     depends_on: tuple[str, ...]
     allowed_files: tuple[str, ...]
     acceptance_command: str | None
+    base_branch: str | None
+    target_branch: str | None
+    source_branches: tuple[str, ...]
+    merge_order: tuple[str, ...]
+    instructions: str | None
     prompt: str | None
     prompt_file: Path | None
     prompt_file_raw: str | None
@@ -218,6 +227,8 @@ def validate_plan(config: ProjectConfig, plan: FeaturePlan) -> ValidationResult:
     for task in plan.tasks:
         if not TASK_ID_RE.match(task.id):
             result.errors.append(f"invalid task id: {task.id}")
+        if task.kind not in TASK_KINDS:
+            result.errors.append(f"{task.id}: invalid task kind: {task.kind}")
         if task.id in seen:
             result.errors.append(f"duplicate task id: {task.id}")
         seen.add(task.id)
@@ -271,13 +282,16 @@ def validate_plan(config: ProjectConfig, plan: FeaturePlan) -> ValidationResult:
                 result.errors.append(f"{task.id}: prompt_file must be under pool plans/: {task.prompt_file}")
 
         if task.status in EXPORTABLE_TASK_STATUSES:
-            worker_id = task.worker or "default"
-            if worker_id not in config.workers:
-                result.errors.append(f"{task.id}: unknown worker '{worker_id}'")
-            if not task.allowed_files:
-                result.errors.append(f"{task.id}: allowed_files is required for {task.status} tasks")
-            if not task.prompt and not task.prompt_file:
-                result.errors.append(f"{task.id}: prompt or prompt_file is required for {task.status} tasks")
+            if task.kind == TASK_KIND_IMPLEMENTATION:
+                worker_id = task.worker or "default"
+                if worker_id not in config.workers:
+                    result.errors.append(f"{task.id}: unknown worker '{worker_id}'")
+                if not task.allowed_files:
+                    result.errors.append(f"{task.id}: allowed_files is required for {task.status} tasks")
+                if not task.prompt and not task.prompt_file:
+                    result.errors.append(f"{task.id}: prompt or prompt_file is required for {task.status} tasks")
+            elif task.kind == TASK_KIND_INTEGRATION:
+                _validate_plan_integration_task(config, task, result)
             open_task_replans = [blocker.id for blocker in task.replan_blockers if blocker.status in REPLAN_OPEN_STATUSES]
             if open_task_replans:
                 result.errors.append(f"{task.id}: open replan blockers: {', '.join(open_task_replans)}")
@@ -290,7 +304,7 @@ def validate_plan(config: ProjectConfig, plan: FeaturePlan) -> ValidationResult:
                     result.warnings.append(f"{task.id}: dependency '{dep}' has no explicit contract")
 
         if task.status == "ready":
-            branch = task_branch(task.id)
+            branch = _task_branch_for_plan_task(task)
             if branch_exists(config, branch):
                 result.errors.append(
                     f"{task.id}: task branch already exists: {branch}; choose a new task id or remove the old branch"
@@ -299,7 +313,12 @@ def validate_plan(config: ProjectConfig, plan: FeaturePlan) -> ValidationResult:
             if worktree.exists():
                 result.errors.append(f"{task.id}: task worktree already exists: {worktree}")
 
-    ready_tasks = [task for task in plan.tasks if task.status in EXPORTABLE_TASK_STATUSES]
+    ready_tasks = [
+        task
+        for task in plan.tasks
+        if task.status in EXPORTABLE_TASK_STATUSES
+        if task.kind == TASK_KIND_IMPLEMENTATION or task.allowed_files
+    ]
     for left_index, left in enumerate(ready_tasks):
         for right in ready_tasks[left_index + 1 :]:
             if not paths_overlap(left.allowed_files, right.allowed_files):
@@ -454,13 +473,14 @@ def export_ready_tasks_many(
 
     for plan, task in selected:
         target_prompt = task_dir / f"{task.id}.md"
-        if target_prompt.exists() and not force:
+        if task.kind == TASK_KIND_IMPLEMENTATION and target_prompt.exists() and not force:
             raise ConfigError(f"{task.id}: exported prompt already exists: {target_prompt}")
         if task.id in existing_ids and not force:
             raise ConfigError(f"{task.id}: manifest task already exists: {manifest_resolved}")
 
-        target_prompt.parent.mkdir(parents=True, exist_ok=True)
-        target_prompt.write_text(_render_task_prompt(plan, task, plans), encoding="utf-8")
+        if task.kind == TASK_KIND_IMPLEMENTATION:
+            target_prompt.parent.mkdir(parents=True, exist_ok=True)
+            target_prompt.write_text(_render_task_prompt(plan, task, plans), encoding="utf-8")
 
         manifest_item = _manifest_item(plan, task, plans)
         if task.id in existing_ids:
@@ -496,7 +516,12 @@ def plan_status_lines(config: ProjectConfig, plan: FeaturePlan) -> list[str]:
         execution = state.status if state else "planned"
         exit_code = "" if not state or state.exit_code is None else f" exit={state.exit_code}"
         lines.append(f"{task.id} {task.status} execution={execution}{exit_code}")
-        lines.append(f"  worker: {task.worker or 'default'}")
+        lines.append(f"  kind: {task.kind}")
+        if task.kind == TASK_KIND_INTEGRATION:
+            lines.append("  executor: codex")
+            lines.append(f"  target_branch: {task.target_branch or f'integration/{task.id}'}")
+        else:
+            lines.append(f"  worker: {task.worker or 'default'}")
         lines.append(f"  depends_on: {', '.join(task.depends_on) if task.depends_on else 'none'}")
         lines.append(f"  allowed_files: {len(task.allowed_files)}")
     return lines
@@ -546,6 +571,7 @@ def plan_next_lines(
             reason = "; ".join(blockers) or _batch_selection_blocker(config, task, selected_tasks, limit)
             lines.append(f"{task.id} blocked: {reason}")
         lines.append(f"  status: {task.status}")
+        lines.append(f"  kind: {task.kind}")
         lines.append(f"  depends_on: {', '.join(task.depends_on) if task.depends_on else 'none'}")
         lines.append(f"  allowed_files: {len(task.allowed_files)}")
     return lines
@@ -592,6 +618,7 @@ def plan_next_all_lines(
                 reason = "; ".join(blockers) or _batch_selection_blocker(config, task, selected_tasks, limit)
                 lines.append(f"{task.id} blocked: {reason}")
             lines.append(f"  status: {task.status}")
+            lines.append(f"  kind: {task.kind}")
             lines.append(f"  depends_on: {', '.join(task.depends_on) if task.depends_on else 'none'}")
             lines.append(f"  allowed_files: {len(task.allowed_files)}")
     return lines
@@ -629,19 +656,27 @@ def next_runnable_tasks(
     limit = max_parallel or config.max_parallel
     selected: list[tuple[FeaturePlan, PlanTask]] = []
     worker_counts: dict[str, int] = {}
+    selected_worker_count = 0
     for plan in plans:
         for task in plan.tasks:
             if _plan_task_blockers(config, plan, task, ignore_dependency_state, dependency_scope):
                 continue
-            if len(selected) >= limit:
+            if any(
+                (task.allowed_files or other.allowed_files) and paths_overlap(task.allowed_files, other.allowed_files)
+                for _, other in selected
+            ):
                 continue
-            if any(paths_overlap(task.allowed_files, other.allowed_files) for _, other in selected):
+            if task.kind == TASK_KIND_INTEGRATION:
+                selected.append((plan, task))
+                continue
+            if selected_worker_count >= limit:
                 continue
             worker_id = task.worker or "default"
             worker = config.workers.get(worker_id)
             if worker and worker_counts.get(worker_id, 0) >= worker.max_parallel:
                 continue
             selected.append((plan, task))
+            selected_worker_count += 1
             worker_counts[worker_id] = worker_counts.get(worker_id, 0) + 1
     return selected
 
@@ -752,22 +787,38 @@ def _parse_replan_blocker(raw: Any) -> ReplanBlocker:
     )
 
 
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        value = (value,)
+    return tuple(str(item).strip() for item in value or [] if str(item).strip())
+
+
 def _parse_task(pool_root: Path, raw: Any) -> PlanTask:
     if not isinstance(raw, dict):
         raise ConfigError("plan task entries must be objects")
     task_id = str(raw.get("id") or "").strip()
     title = str(raw.get("title") or task_id).strip() or task_id
+    kind = _optional_str(raw.get("kind")) or TASK_KIND_IMPLEMENTATION
     prompt_file_raw = _optional_str(raw.get("prompt_file"))
     prompt_file = _resolve_pool_path(pool_root, prompt_file_raw) if prompt_file_raw else None
     replacement_contract = _optional_str(raw.get("replacement_contract")) or "unknown"
+    source_branches = _string_tuple(raw.get("source_branches") or [])
+    merge_order_raw = raw.get("merge_order")
+    merge_order = _string_tuple(merge_order_raw) if merge_order_raw is not None else source_branches
     return PlanTask(
         id=task_id,
         title=title,
         status=str(raw.get("status") or "draft").strip(),
+        kind=kind,
         worker=_optional_str(raw.get("worker")),
         depends_on=tuple(str(dep).strip() for dep in raw.get("depends_on") or []),
         allowed_files=tuple(str(path).replace("\\", "/") for path in raw.get("allowed_files") or []),
         acceptance_command=_optional_str(raw.get("acceptance_command")),
+        base_branch=_optional_str(raw.get("base_branch")),
+        target_branch=_optional_str(raw.get("target_branch")),
+        source_branches=source_branches,
+        merge_order=merge_order,
+        instructions=_optional_str(raw.get("instructions")),
         prompt=_optional_str(raw.get("prompt")),
         prompt_file=prompt_file,
         prompt_file_raw=prompt_file_raw,
@@ -796,16 +847,72 @@ def _load_or_empty_manifest(path: Path) -> dict[str, Any]:
     return data
 
 
+def _task_branch_for_plan_task(task: PlanTask) -> str:
+    if task.kind == TASK_KIND_INTEGRATION:
+        return task.target_branch or f"integration/{task.id}"
+    return task_branch(task.id)
+
+
+def _validate_plan_integration_task(config: ProjectConfig, task: PlanTask, result: ValidationResult) -> None:
+    if task.worker:
+        result.warnings.append(f"{task.id}: integration task ignores worker '{task.worker}'")
+    if task.prompt or task.prompt_file:
+        result.warnings.append(f"{task.id}: integration task ignores prompt/prompt_file")
+    if not task.instructions and not task.source_branches:
+        result.errors.append(f"{task.id}: integration task requires instructions or source_branches")
+    if len(set(task.merge_order)) != len(task.merge_order):
+        result.errors.append(f"{task.id}: integration merge_order contains duplicates")
+    unknown_merge = [branch for branch in task.merge_order if branch not in set(task.source_branches)]
+    if unknown_merge:
+        result.errors.append(
+            f"{task.id}: merge_order branches must be listed in source_branches: {', '.join(unknown_merge)}"
+        )
+    effective_base = task.base_branch or config.base_branch
+    refs = [("base_branch", effective_base), *[("source_branches", ref) for ref in task.source_branches]]
+    for label, ref in refs:
+        if not _git_ref_exists(config.repo, ref):
+            result.errors.append(f"{task.id}: {label} ref not found: {ref}")
+    target = task.target_branch or f"integration/{task.id}"
+    if target == effective_base or target in set(task.source_branches):
+        result.errors.append(f"{task.id}: target_branch must not match base_branch or source_branches")
+
+
+def _git_ref_exists(repo: Path, ref: str) -> bool:
+    import subprocess
+
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", ref],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+    )
+    return proc.returncode == 0
+
+
 def _manifest_item(plan: FeaturePlan, task: PlanTask, all_plans: tuple[FeaturePlan, ...]) -> dict[str, Any]:
     item = {
         "id": task.id,
+        "kind": task.kind,
         "feature_id": plan.feature_id,
         "title": task.title,
-        "worker": task.worker or "default",
-        "prompt_file": f"tasks/{task.id}.md",
         "allowed_files": list(task.allowed_files),
         "acceptance_command": task.acceptance_command,
     }
+    if task.kind == TASK_KIND_IMPLEMENTATION:
+        item["worker"] = task.worker or "default"
+        item["prompt_file"] = f"tasks/{task.id}.md"
+    if task.kind == TASK_KIND_INTEGRATION:
+        if task.base_branch:
+            item["base_branch"] = task.base_branch
+        if task.target_branch:
+            item["target_branch"] = task.target_branch
+        if task.source_branches:
+            item["source_branches"] = list(task.source_branches)
+        if task.merge_order:
+            item["merge_order"] = list(task.merge_order)
+        if task.instructions:
+            item["instructions"] = task.instructions
     item.update(dependency_metadata_dict(task, all_plans))
     return item
 
@@ -949,15 +1056,19 @@ def _plan_task_blockers(
         blockers.append(f"execution status is {state.status}")
     if task.status != "ready":
         blockers.append(f"status is {task.status}, not ready")
-    worker_id = task.worker or "default"
-    if worker_id not in config.workers:
-        blockers.append(f"unknown worker '{worker_id}'")
-    if not task.allowed_files:
-        blockers.append("allowed_files is empty")
-    if not task.prompt and not task.prompt_file:
-        blockers.append("missing prompt or prompt_file")
-    if task.prompt_file and not task.prompt_file.is_file():
-        blockers.append(f"prompt file not found: {task.prompt_file}")
+    if task.kind == TASK_KIND_IMPLEMENTATION:
+        worker_id = task.worker or "default"
+        if worker_id not in config.workers:
+            blockers.append(f"unknown worker '{worker_id}'")
+        if not task.allowed_files:
+            blockers.append("allowed_files is empty")
+        if not task.prompt and not task.prompt_file:
+            blockers.append("missing prompt or prompt_file")
+        if task.prompt_file and not task.prompt_file.is_file():
+            blockers.append(f"prompt file not found: {task.prompt_file}")
+    elif task.kind == TASK_KIND_INTEGRATION:
+        if not task.instructions and not task.source_branches:
+            blockers.append("missing instructions or source_branches")
 
     task_ids = {item.id for item in plan.tasks}
     for dep in task.depends_on:
@@ -984,15 +1095,22 @@ def _batch_selection_blocker(
     max_parallel: int,
 ) -> str:
     for selected in selected_tasks:
-        if paths_overlap(task.allowed_files, selected.allowed_files):
+        if (task.allowed_files or selected.allowed_files) and paths_overlap(task.allowed_files, selected.allowed_files):
             return f"allowed_files overlaps with selected {selected.id}"
+    if task.kind == TASK_KIND_INTEGRATION:
+        return "not selected for this batch"
     worker_id = task.worker or "default"
     worker = config.workers.get(worker_id)
     if worker:
-        worker_count = sum(1 for selected in selected_tasks if (selected.worker or "default") == worker_id)
+        worker_count = sum(
+            1
+            for selected in selected_tasks
+            if selected.kind == TASK_KIND_IMPLEMENTATION and (selected.worker or "default") == worker_id
+        )
         if worker_count >= worker.max_parallel:
             return f"worker '{worker_id}' max_parallel reached"
-    if len(selected_tasks) >= max_parallel:
+    selected_worker_count = sum(1 for selected in selected_tasks if selected.kind == TASK_KIND_IMPLEMENTATION)
+    if selected_worker_count >= max_parallel:
         return "max_parallel limit reached"
     return "not selected for this batch"
 
@@ -1428,6 +1546,7 @@ def _task_has_open_replan(raw: dict[str, Any]) -> bool:
 def _task_audit_summary(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": raw.get("id"),
+        "kind": raw.get("kind") or TASK_KIND_IMPLEMENTATION,
         "status": raw.get("status"),
         "depends_on": raw.get("depends_on") or [],
         "allowed_files": raw.get("allowed_files") or [],
