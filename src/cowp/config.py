@@ -33,6 +33,11 @@ class AcceptanceConfig:
 
 
 @dataclass(frozen=True)
+class SetupConfig:
+    command: str | None = None
+
+
+@dataclass(frozen=True)
 class WorkerProfile:
     id: str
     agent: str | None = None
@@ -52,6 +57,7 @@ class ProjectConfig:
     max_parallel: int
     opencode: OpencodeConfig
     acceptance: AcceptanceConfig
+    setup: SetupConfig
     workers: dict[str, WorkerProfile]
 
 
@@ -119,6 +125,9 @@ def default_config_data(repo: Path, external_pool: bool = False) -> dict[str, An
         "acceptance": {
             "worker": None,
             "main": None,
+        },
+        "setup": {
+            "command": None,
         },
         "workers": [
             {
@@ -193,6 +202,7 @@ def parse_project_config(
 
     opencode_data = data.get("opencode") or {}
     acceptance_data = data.get("acceptance") or {}
+    setup_data = data.get("setup") or {}
 
     default_worktree_root = "../{repo_name}.worktrees" if legacy_layout else "worktrees"
     default_runs_root = "../{repo_name}.runs" if legacy_layout else "runs"
@@ -213,6 +223,9 @@ def parse_project_config(
         acceptance=AcceptanceConfig(
             worker=_optional_str(acceptance_data.get("worker")),
             main=_optional_str(acceptance_data.get("main")),
+        ),
+        setup=SetupConfig(
+            command=_optional_str(setup_data.get("command")),
         ),
         workers=workers,
     )

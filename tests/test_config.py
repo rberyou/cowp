@@ -18,6 +18,7 @@ def test_config_expands_default_roots(git_repo: Path):
 
     assert config.worktree_root == git_repo.parent / "repo.worktrees"
     assert config.runs_root == git_repo.parent / "repo.runs"
+    assert config.setup.command is None
 
 
 def test_manifest_validation_reports_duplicate_invalid_unknown_and_missing_prompt(

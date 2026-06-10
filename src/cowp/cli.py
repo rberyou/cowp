@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 from importlib import resources
+import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -38,6 +40,7 @@ from cowp.gitops import (
     task_branch_ahead_commits,
     task_changed_files_for_review,
     task_review_diff,
+    task_review_diff_for_paths,
     task_review_diff_stat,
     task_review_snapshot_hash,
     task_status,
@@ -293,7 +296,15 @@ def build_parser() -> argparse.ArgumentParser:
     add_repo_manifest(start)
     start.add_argument("--task", action="append")
     start.add_argument("--skip-clean-check", action="store_true")
+    start.add_argument("--setup", action="store_true", help="run configured project setup after creating each worktree")
     start.set_defaults(func=cmd_start)
+
+    setup = sub.add_parser("setup", help="run configured project setup in task worktrees")
+    add_repo_manifest(setup)
+    setup_selection = setup.add_mutually_exclusive_group(required=True)
+    setup_selection.add_argument("--task", action="append")
+    setup_selection.add_argument("--all", action="store_true")
+    setup.set_defaults(func=cmd_setup)
 
     run = sub.add_parser("run", help="run OpenCode workers")
     add_repo_manifest(run)
@@ -310,6 +321,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_repo_manifest(review)
     review.add_argument("--task", required=True)
     review.add_argument("--log-tail", type=int, default=40)
+    review.add_argument("--summary", action="store_true", help="print status and diff stat without full diff")
+    review.add_argument("--files", action="store_true", help="print changed file paths without full diff")
+    review.add_argument("--file", action="append", default=[], help="print diff for one reviewed path; may be repeated")
     review.set_defaults(func=cmd_review)
 
     finding = sub.add_parser("finding", help="manage execution review findings")
@@ -357,7 +371,9 @@ def build_parser() -> argparse.ArgumentParser:
     finish = sub.add_parser("finish", help="commit and merge a reviewed task")
     add_repo_manifest(finish)
     finish.add_argument("--task", required=True)
-    finish.add_argument("--reviewed-files", nargs="+", required=True)
+    finish.add_argument("--reviewed-files", nargs="*", default=[])
+    finish.add_argument("--reviewed-files-from", action="append", default=[], help="read reviewed file paths from a UTF-8 line-based file")
+    finish.add_argument("--reviewed-all-changed", action="store_true", help="mark all files in the current fresh review snapshot as reviewed")
     finish.add_argument("--commit-message")
     finish.add_argument("--merge-message")
     finish.add_argument("--keep-worktree", action="store_true")
@@ -660,6 +676,8 @@ def cmd_start(args: argparse.Namespace) -> int:
             review_diff_path=None,
             final_diff_path=None,
             reviewed_files=None,
+            setup_command=None,
+            setup_exit_code=None,
             worker_acceptance_command=None,
             worker_acceptance_exit_code=None,
             main_acceptance_command=None,
@@ -673,8 +691,59 @@ def cmd_start(args: argparse.Namespace) -> int:
             superseded_at=None,
             superseded_finding_ids=[],
         )
+        if args.setup:
+            exit_code = run_task_setup(config, store, task)
+            if exit_code != 0:
+                return exit_code
         print(f"{task.id}: {worktree}")
     return 0
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    store = StateStore(config.runs_root)
+    states = store.load()
+    if args.all:
+        task_ids = [
+            task.id
+            for task in manifest.tasks
+            if (state := states.get(task.id))
+            if state.worktree and Path(state.worktree).exists()
+        ]
+    else:
+        task_ids = list(args.task)
+    if not task_ids:
+        print("no task worktrees to setup")
+        return 0
+    exit_codes = []
+    for task in selected_tasks(manifest, task_ids):
+        exit_codes.append(run_task_setup(config, store, task))
+    return 0 if all(code == 0 for code in exit_codes) else 1
+
+
+def run_task_setup(config: ProjectConfig, store: StateStore, task) -> int:
+    command = config.setup.command
+    if not command:
+        raise ConfigError("setup.command is not configured")
+    worktree = task_worktree(config, task.id)
+    if not worktree.exists():
+        raise GitError(f"{task.id}: task worktree does not exist: {worktree}")
+    store.update(task.id, setup_command=command, setup_exit_code=None)
+    if os.name == "nt":
+        args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]
+    else:
+        args = ["bash", "-lc", command]
+    proc = subprocess.run(args, cwd=worktree, text=True)
+    store.update(task.id, setup_command=command, setup_exit_code=proc.returncode)
+    store.append_audit_event(
+        task.id,
+        "setup",
+        "project setup command completed" if proc.returncode == 0 else "project setup command failed",
+        setup_command=command,
+        exit_code=proc.returncode,
+    )
+    print(f"{task.id}: setup_exit={proc.returncode}")
+    return proc.returncode
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -728,12 +797,16 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"  branch: {branch_for_task(task)}")
         if is_integration_task(task):
             print(f"  base_branch: {task_effective_base_branch(config, task)}")
+            print(f"  integration_result: {task_target_branch(task)}")
+            print("  finish_destination: target_branch")
             if task.source_branches:
                 print(f"  source_branches: {', '.join(task.source_branches)}")
             if task.merge_order:
                 print(f"  merge_order: {', '.join(task.merge_order)}")
         print(f"  worktree: {worktree}")
         print(f"  git: {compact(task_status(worktree))}")
+        if state and state.setup_command:
+            print(f"  setup: exit={state.setup_exit_code} command={state.setup_command}")
         if is_integration_task(task) and worktree.exists():
             ahead = task_branch_ahead_commits(config, task, worktree)
             print(f"  branch_ahead: {len(ahead)}")
@@ -770,6 +843,8 @@ def cmd_review(args: argparse.Namespace) -> int:
     status = task_status(worktree)
     diff_stat = task_review_diff_stat(config, task, worktree)
     diff = task_review_diff(config, task, worktree)
+    changed_files = sorted(task_changed_files_for_review(config, task, worktree))
+    selected_diff = task_review_diff_for_paths(config, task, worktree, args.file) if args.file else None
     snapshot_hash = task_review_snapshot_hash(config, task, worktree)
     review_dir = config.runs_root / task.id
     review_dir.mkdir(parents=True, exist_ok=True)
@@ -802,6 +877,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         snapshot_hash=snapshot_hash,
         review_snapshot_preserved=preserve_snapshot,
         review_diff_path=state.review_diff_path if preserve_snapshot else str(diff_path),
+        output_mode="files" if args.files else "summary" if args.summary else "file" if args.file else "full",
     )
     _safe_print(f"# {task.id} {task.title}")
     _safe_print(f"\nkind: {task.kind}")
@@ -823,8 +899,19 @@ def cmd_review(args: argparse.Namespace) -> int:
     _safe_print(status or "<clean>")
     _safe_print("\n## diff stat")
     _safe_print(diff_stat or "<no diff>")
+    if args.files:
+        _safe_print("\n## changed files")
+        _safe_print("\n".join(changed_files) if changed_files else "<no changed files>")
+        return 0
+    if args.summary:
+        _safe_print("\n## review files")
+        _safe_print(f"status: {status_path}")
+        _safe_print(f"stat: {stat_path}")
+        _safe_print(f"diff: {state.review_diff_path if preserve_snapshot else diff_path}")
+        _safe_print(f"snapshot: {snapshot_hash}")
+        return 0
     _safe_print("\n## diff")
-    _safe_print(diff or "<no diff>")
+    _safe_print((selected_diff if selected_diff is not None else diff) or "<no diff>")
     log_path = config.runs_root / task.id / "opencode.jsonl"
     if not is_integration_task(task) and log_path.exists():
         _safe_print("\n## worker log tail")
@@ -973,6 +1060,7 @@ def cmd_finish(args: argparse.Namespace) -> int:
     task = manifest.get_task(args.task)
     store = StateStore(config.runs_root)
     state = get_or_create_task_state(store, task.id)
+    reviewed_files = resolve_reviewed_files(config, task, state, args)
     acceptance = task.acceptance_command or config.acceptance.worker
     commit_message = args.commit_message or f"{task.id} {task.title}"
     merge_message = args.merge_message or f"Merge {task.id} {task.title}"
@@ -985,14 +1073,14 @@ def cmd_finish(args: argparse.Namespace) -> int:
         store=store,
         task=task,
         state=state,
-        reviewed_files=args.reviewed_files,
+        reviewed_files=reviewed_files,
     )
     final_diff_path.write_text(task_review_diff(config, task, worktree) or "", encoding="utf-8")
     try:
         finish_result = finish_task(
             config=config,
             task=task,
-            reviewed_files=args.reviewed_files,
+            reviewed_files=reviewed_files,
             commit_message=commit_message,
             merge_message=merge_message,
             acceptance_command=acceptance,
@@ -1026,7 +1114,7 @@ def cmd_finish(args: argparse.Namespace) -> int:
         exit_code=0,
         review_status="merged",
         final_diff_path=str(final_diff_path),
-        reviewed_files=list(args.reviewed_files),
+        reviewed_files=list(reviewed_files),
         worker_acceptance_command=acceptance,
         worker_acceptance_exit_code=finish_result.worker_acceptance_exit_code,
         main_acceptance_command=config.acceptance.main,
@@ -1103,6 +1191,43 @@ def validation_scope_plans(config: ProjectConfig, args: argparse.Namespace):
 
 def selected_tasks(manifest: Manifest, task_ids) -> list:
     return [manifest.get_task(task_id) for task_id in task_ids]
+
+
+def resolve_reviewed_files(config: ProjectConfig, task, state: TaskState, args: argparse.Namespace) -> list[str]:
+    reviewed: list[str] = []
+    reviewed.extend(args.reviewed_files or [])
+    for list_file in args.reviewed_files_from or []:
+        path = Path(list_file).expanduser()
+        if not path.is_absolute():
+            path = config.pool_root / path
+        try:
+            lines = path.read_text(encoding="utf-8-sig").splitlines()
+        except FileNotFoundError as exc:
+            raise ConfigError(f"reviewed files list not found: {path}") from exc
+        reviewed.extend(line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#"))
+
+    if args.reviewed_all_changed:
+        worktree = task_worktree(config, task.id)
+        current_hash = task_review_snapshot_hash(config, task, worktree)
+        if not state.review_snapshot_hash:
+            raise GitError(f"{task.id}: --reviewed-all-changed requires review material; run cowp review first")
+        if current_hash != state.review_snapshot_hash:
+            raise GitError(f"{task.id}: --reviewed-all-changed requires a fresh review snapshot; run cowp review again")
+        reviewed.extend(sorted(task_changed_files_for_review(config, task, worktree)))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for path in reviewed:
+        raw_path = str(path).replace("\\", "/").strip()
+        normalized = normalize_review_path(raw_path)
+        key = normalized or f"invalid:{raw_path}"
+        if not raw_path or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(raw_path)
+    if not deduped:
+        raise ConfigError("finish requires --reviewed-files, --reviewed-files-from, or --reviewed-all-changed")
+    return deduped
 
 
 def get_or_create_task_state(store: StateStore, task_id: str) -> TaskState:

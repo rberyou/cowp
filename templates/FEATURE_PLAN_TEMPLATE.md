@@ -36,6 +36,14 @@ Feature dependencies:
 - Test strategy:
 - Rollout or migration notes:
 
+## Concept Consistency Review
+
+- Canonical domain terms:
+- API fields and response shape:
+- Persistence/schema/frontmatter/generated artifacts:
+- Helper/skill/docs wording:
+- Normalization and compatibility rules:
+
 ## Review Gate
 
 ### Review Round 1 Findings

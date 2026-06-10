@@ -50,12 +50,16 @@ class BacklogTask:
     worker: str | None
     base_branch: str | None
     target_branch: str | None
+    integration_result: str | None
+    finish_destination: str | None
     source_branches: tuple[str, ...]
     merge_order: tuple[str, ...]
     branch_ahead_count: int | None
     branch: str | None
     worktree: str | None
     exit_code: int | None
+    setup_command: str | None
+    setup_exit_code: int | None
     allowed_files_count: int
     log_path: str | None
     review_diff_path: str | None
@@ -274,12 +278,16 @@ def _task_snapshot(
         worker=None if task.kind == "integration" else state.worker if state and state.worker else task.worker or "default",
         base_branch=(task.base_branch or config.base_branch) if task.kind == "integration" else None,
         target_branch=(task.target_branch or f"integration/{task.id}") if task.kind == "integration" else None,
+        integration_result=(task.target_branch or f"integration/{task.id}") if task.kind == "integration" else None,
+        finish_destination="target_branch" if task.kind == "integration" else "base_branch",
         source_branches=task.source_branches,
         merge_order=task.merge_order,
         branch_ahead_count=branch_ahead_count,
         branch=state.branch if state else None,
         worktree=state.worktree if state else None,
         exit_code=state.exit_code if state else None,
+        setup_command=state.setup_command if state else None,
+        setup_exit_code=state.setup_exit_code if state else None,
         allowed_files_count=len(task.allowed_files),
         log_path=state.log_path if state else None,
         review_diff_path=state.review_diff_path if state else None,
@@ -398,12 +406,16 @@ def _unassigned_manifest_tasks(
                 ),
                 base_branch=base_branch if kind == "integration" else None,
                 target_branch=target_branch if kind == "integration" else None,
+                integration_result=target_branch if kind == "integration" else None,
+                finish_destination="target_branch" if kind == "integration" else "base_branch",
                 source_branches=source_branches,
                 merge_order=merge_order,
                 branch_ahead_count=branch_ahead_count,
                 branch=state.branch if state else None,
                 worktree=state.worktree if state else None,
                 exit_code=state.exit_code if state else None,
+                setup_command=state.setup_command if state else None,
+                setup_exit_code=state.setup_exit_code if state else None,
                 allowed_files_count=len(raw.get("allowed_files") or []),
                 log_path=state.log_path if state else None,
                 review_diff_path=state.review_diff_path if state else None,
@@ -447,8 +459,16 @@ def _feature_lines(feature: BacklogFeature) -> list[str]:
             lines.append("      withdrawn_replacements: " + ", ".join(task.withdrawn_replacement_tasks))
         if task.kind:
             lines.append(f"      kind: {task.kind} executor={task.executor}")
+        if task.base_branch:
+            lines.append(f"      base_branch: {task.base_branch}")
         if task.target_branch:
             lines.append(f"      target_branch: {task.target_branch}")
+        if task.integration_result:
+            lines.append(f"      integration_result: {task.integration_result}")
+        if task.finish_destination:
+            lines.append(f"      finish_destination: {task.finish_destination}")
+        if task.setup_command:
+            lines.append(f"      setup: exit={task.setup_exit_code} command={task.setup_command}")
         if task.source_branches:
             lines.append("      source_branches: " + ", ".join(task.source_branches))
         if task.branch_ahead_count is not None:
@@ -597,12 +617,16 @@ def _task_to_dict(task: BacklogTask) -> dict[str, Any]:
         "worker": task.worker,
         "base_branch": task.base_branch,
         "target_branch": task.target_branch,
+        "integration_result": task.integration_result,
+        "finish_destination": task.finish_destination,
         "source_branches": list(task.source_branches),
         "merge_order": list(task.merge_order),
         "branch_ahead_count": task.branch_ahead_count,
         "branch": task.branch,
         "worktree": task.worktree,
         "exit_code": task.exit_code,
+        "setup_command": task.setup_command,
+        "setup_exit_code": task.setup_exit_code,
         "allowed_files_count": task.allowed_files_count,
         "log_path": task.log_path,
         "review_diff_path": task.review_diff_path,

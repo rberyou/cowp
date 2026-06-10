@@ -212,7 +212,30 @@ execution states.
 
 Prepare each worktree with the repository-specific environment setup. `cowp`
 does not create virtual environments, install packages, run CMake, or generate
-language-specific build artifacts.
+language-specific build artifacts unless the project explicitly configures a
+setup command.
+
+Optional project setup lives in `config.json`:
+
+```json
+{
+  "setup": {
+    "command": "& '.\\.venv\\Scripts\\python.exe' -m pip install -e '.[dev]'"
+  }
+}
+```
+
+Run it explicitly after start:
+
+```powershell
+cowp setup --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --task TASK-001
+```
+
+Or run setup immediately for newly created worktrees:
+
+```powershell
+cowp start --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --setup
+```
 
 For integration tasks, `cowp start` creates a Codex-owned branch using
 `target_branch` or `integration/TASK-NNN`. It starts from the task `base_branch`
@@ -258,6 +281,15 @@ cowp review --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --ta
 `runs_root/TASK-NNN/`. New untracked files are included in the review diff. The
 review command also records a snapshot hash; if Codex patches the worktree after
 review, run `cowp review` again before finishing.
+
+For large diffs, use narrower terminal output while still recording the review
+snapshot:
+
+```powershell
+cowp review --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --task TASK-901 --summary
+cowp review --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --task TASK-901 --files
+cowp review --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --task TASK-901 --file src/example.py
+```
 
 For integration tasks, `review` compares the branch and worktree against the
 effective base branch (`task.base_branch` or repository `base_branch`) and also
@@ -345,6 +377,12 @@ running project-specific checks. `finish` still requires explicit
 `--reviewed-files`. When an integration task has empty `allowed_files`, any
 repository path may be reviewed, but every changed path in the integration diff
 must be covered by `--reviewed-files`.
+
+For large integration reviews, write reviewed paths into a pool-relative UTF-8
+line file and pass it with `--reviewed-files-from`. When Codex has reviewed the
+current snapshot as a whole, `--reviewed-all-changed` expands to every changed
+path, but only if the current snapshot hash still matches the latest
+`cowp review`.
 
 `finish` requires review material, refuses stale review snapshots, stages only
 reviewed files, refuses unreviewed changes, and runs task acceptance without

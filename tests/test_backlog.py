@@ -192,6 +192,8 @@ def test_snapshot_reports_integration_task_metadata(
     assert task["executor"] == "codex"
     assert task["worker"] is None
     assert task["target_branch"] == "integration/TASK-901"
+    assert task["integration_result"] == "integration/TASK-901"
+    assert task["finish_destination"] == "target_branch"
     assert task["source_branches"] == ["feature/source"]
 
 

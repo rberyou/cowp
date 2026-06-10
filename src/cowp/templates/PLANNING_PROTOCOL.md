@@ -90,6 +90,10 @@ Review passes only when:
 
 - There are no unresolved findings that would force a worker to invent product behavior or architecture.
 - API, data, and state-transition contracts are explicit enough to test.
+- Core domain terms are consistent across public APIs, persistence, generated
+  artifacts, helper/skill commands, and user-facing docs. If a term maps to a
+  path, identifier, state, or protocol field, the plan states the canonical
+  representation and where normalization happens.
 - Task boundaries match implementation dependencies.
 - Acceptance criteria include the important edge cases.
 

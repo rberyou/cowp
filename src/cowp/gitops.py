@@ -215,6 +215,27 @@ def task_review_diff(config: ProjectConfig, task: ManifestTask, worktree: Path) 
     return task_diff(worktree)
 
 
+def task_review_diff_for_paths(
+    config: ProjectConfig,
+    task: ManifestTask,
+    worktree: Path,
+    paths: list[str],
+) -> str:
+    normalized_paths = [path.replace("\\", "/").strip("/") for path in paths if path.strip()]
+    if not normalized_paths:
+        return task_review_diff(config, task, worktree)
+    base_args = [task_review_base_sha(config, task, worktree)] if is_integration_task(task) else ["HEAD"]
+    tracked = run_text(["git", "-C", str(worktree), "diff", *base_args, "--", *normalized_paths])
+    untracked = set(_untracked_files(worktree))
+    untracked_parts = [
+        _untracked_file_diff(worktree, rel_path)
+        for rel_path in normalized_paths
+        if rel_path in untracked
+    ]
+    parts = [part.rstrip() for part in [tracked, *untracked_parts] if part.strip()]
+    return "\n\n".join(parts) + ("\n" if parts else "")
+
+
 def task_review_snapshot_hash(config: ProjectConfig, task: ManifestTask, worktree: Path) -> str:
     if is_integration_task(task):
         return task_snapshot_hash_from_base(worktree, task_review_base_sha(config, task, worktree))

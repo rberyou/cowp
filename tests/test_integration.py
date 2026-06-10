@@ -140,8 +140,7 @@ def test_plan_exported_manifest_runs_execution_flow(
                 str(manifest),
                 "--task",
                 "TASK-101",
-                "--reviewed-files",
-                "src/example.py",
+                "--reviewed-all-changed",
             ]
         )
         == 0
@@ -215,6 +214,101 @@ def test_integration_task_start_run_review_finish(
         ["git", "rev-parse", "integration/TASK-901"],
         git_repo,
     ).stdout.strip()
+
+
+def test_start_setup_runs_project_specific_setup_command(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    config_data = json.loads(workerpool_config.read_text(encoding="utf-8"))
+    setup_code = "from pathlib import Path; Path('setup.marker').write_text('ok', encoding='utf-8')"
+    if os.name == "nt":
+        config_data["setup"] = {"command": f"& '{sys.executable}' -c \"{setup_code}\""}
+    else:
+        config_data["setup"] = {"command": f"'{sys.executable}' -c \"{setup_code}\""}
+    workerpool_config.write_text(json.dumps(config_data, indent=2) + "\n", encoding="utf-8")
+    run(["git", "add", ".codex-workerpool/config.json"], git_repo)
+    run(["git", "commit", "-m", "configure setup"], git_repo)
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "setup task",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+                "acceptance_command": None,
+            }
+        ],
+    )
+
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--setup"]) == 0
+
+    worktree = git_repo.parent / "repo.worktrees" / "TASK-001"
+    assert (worktree / "setup.marker").read_text(encoding="utf-8") == "ok"
+    state = StateStore(git_repo.parent / "repo.runs").load()["TASK-001"]
+    assert state.setup_command == config_data["setup"]["command"]
+    assert state.setup_exit_code == 0
+
+
+def test_review_lightweight_modes_and_finish_reviewed_files_from(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+    capsys,
+    tmp_path: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "light review",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+                "acceptance_command": None,
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001", "--files"]) == 0
+    output = capsys.readouterr().out
+    assert "## changed files" in output
+    assert "src/example.py" in output
+    assert "diff --git" not in output
+
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001", "--summary"]) == 0
+    output = capsys.readouterr().out
+    assert "## review files" in output
+    assert "snapshot:" in output
+    assert "diff --git" not in output
+
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001", "--file", "src/example.py"]) == 0
+    output = capsys.readouterr().out
+    assert "diff --git" in output
+    reviewed_file = tmp_path / "reviewed-files.txt"
+    reviewed_file.write_text("# reviewed after file-level review\nsrc/example.py\n", encoding="utf-8")
+
+    assert main(
+        [
+            "finish",
+            "--repo",
+            str(git_repo),
+            "--manifest",
+            str(manifest),
+            "--task",
+            "TASK-001",
+            "--reviewed-files-from",
+            str(reviewed_file),
+        ]
+    ) == 0
+    state = StateStore(git_repo.parent / "repo.runs").load()["TASK-001"]
+    assert state.reviewed_files == ["src/example.py"]
 
 
 def test_run_all_skips_integration_without_unlocking_downstream_task(

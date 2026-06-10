@@ -69,6 +69,7 @@ Validate and run the exported manifest:
 ```powershell
 cowp validate --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json
 cowp start --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json
+cowp setup --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001
 cowp run --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --all --max-parallel 2
 ```
 
@@ -115,6 +116,10 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
 - Plan validation rejects ready tasks when the task branch or configured task
   worktree path already exists. Choose a fresh task id or explicitly clean up
   the old branch/worktree before export.
+- Project-specific environment setup is configured with `setup.command` in
+  `config.json` and run explicitly with `cowp setup`, or immediately after
+  `cowp start` with `--setup`. WorkerPool does not assume Python, Node, C++, or
+  any fixed project environment.
 - `cowp backlog status` prints a Kanban-style overview with derived `Clarify`,
   running, failed, review-needed, review-blocked, blocked, and merged columns.
 - `cowp backlog serve` starts a local read-only dashboard at
@@ -164,6 +169,9 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
 - `review` writes `runs_root/TASK-NNN/review.diff` so Codex review material is
   reproducible, including untracked new files. It also records a review snapshot
   hash used by `finish`.
+- `review --summary`, `review --files`, and repeated `review --file <path>`
+  reduce terminal output for large diffs while still recording the same review
+  snapshot and diff files under `runs_root`.
 - `cowp finding add/update/resolve` records execution review findings in
   `runs_root/state.json`. Open findings block `finish`; boundary and
   `contract_change` findings remain non-mergeable until reclassified or marked
@@ -173,6 +181,9 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
   worker/manual commits made before the controlled finish step. Integration
   tasks may already contain reviewed branch commits and can finish from a clean
   worktree when the branch is ahead of its effective base branch.
+- `finish --reviewed-files-from <file>` reads reviewed paths from a pool-relative
+  UTF-8 line file. `finish --reviewed-all-changed` expands to every changed path
+  only when the current worktree still matches the latest review snapshot.
 - For implementation tasks, `finish` runs the controller acceptance inside a
   `git merge --no-ff --no-commit` transaction and creates the merge commit only
   after acceptance passes.
