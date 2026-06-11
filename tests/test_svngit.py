@@ -243,6 +243,7 @@ def test_svn_git_prepublish_writes_report_and_never_commits(
                 "BATCH-001",
                 "--acceptance-command",
                 "exit 0",
+                "--loop",
             ]
         )
         == 0
@@ -258,6 +259,7 @@ def test_svn_git_prepublish_writes_report_and_never_commits(
     assert payload["included_tasks"] == ["TASK-001", "TASK-002"]
     assert record["state"] == "prepublish_ready"
     assert record["prepublish_status"] == "prepublish_ready"
+    assert record["review_loop"]["status"] == "clean"
     assert "commit" not in log_path.read_text(encoding="utf-8").splitlines()
 
 

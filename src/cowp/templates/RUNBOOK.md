@@ -328,6 +328,7 @@ Codex reviews one task at a time:
 
 ```powershell
 cowp review --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --task TASK-001
+cowp review-loop begin --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --task TASK-001
 ```
 
 `review` prints and stores git status, diff stat, and full diff under
@@ -365,6 +366,22 @@ cowp finding add `
   --message "short finding"
 ```
 
+Use the review loop for every review pass. Codex may fix non-decision findings
+inside the task boundary, then must record the fix and re-run review before
+completing the loop:
+
+```powershell
+cowp review-loop record-fix `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --task TASK-001 `
+  --summary "fixed RF-001" `
+  --file src/example.py
+
+cowp review --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --task TASK-001
+```
+
 After a patch or audit decision, resolve or update the finding:
 
 ```powershell
@@ -377,10 +394,45 @@ cowp finding resolve `
   --resolution "fixed and retested"
 ```
 
+When no open or active blocking findings remain and the latest review snapshot is
+fresh, complete the loop:
+
+```powershell
+cowp review-loop complete `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --task TASK-001
+```
+
 Open findings block `finish`. Boundary findings and findings marked
 `contract_change` remain non-mergeable even after a normal resolution; reclassify
 mistaken findings with `cowp finding update` or mark erroneous findings
 `invalid` with audit evidence.
+
+If review discovers a decision issue, stop the loop instead of patching:
+
+```powershell
+cowp finding add `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --task TASK-001 `
+  --type boundary `
+  --severity P1 `
+  --requires-decision `
+  --decision-reason "task boundary must change" `
+  --message "requires a wider task boundary"
+
+cowp review-loop stop `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --task TASK-001 `
+  --reason blocked_decision `
+  --blocker RF-001 `
+  --message "requires controller/user decision"
+```
 
 If the boundary or contract issue is real and cannot be fixed inside
 `allowed_files`, do not merge the original task. Mark it superseded, create a

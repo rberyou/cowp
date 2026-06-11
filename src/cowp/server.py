@@ -410,6 +410,10 @@ def dashboard_html(refresh_ms: int) -> str:
       const effectiveDependsOn = (task.effective_depends_on || []).join(', ');
       const blockers = (task.blockers || []).join('; ');
       const reviewFindings = (task.review_findings || []).join('; ');
+      const reviewLoopBlockedBy = (task.review_loop_blocked_by || []).join(', ');
+      const reviewLoop = task.review_loop_status && task.review_loop_status !== 'not_started'
+        ? task.review_loop_status + ' round=' + text(task.review_loop_round) + '/' + text(task.review_loop_max_rounds) + (reviewLoopBlockedBy ? ' blocked_by=' + reviewLoopBlockedBy : '')
+        : '';
       const withdrawnReplacements = (task.withdrawn_replacement_tasks || []).join(', ');
       const replacementChain = (task.replacement_chain || []).join(' -> ');
       const sourceBranches = (task.source_branches || []).join(', ');
@@ -425,6 +429,7 @@ def dashboard_html(refresh_ms: int) -> str:
         ['effective_depends_on', effectiveDependsOn],
         ['blocked_by', blockers],
         ['review_findings', reviewFindings],
+        ['review_loop', reviewLoop],
         ['superseded_by', task.superseded_by],
         ['replacement_contract', task.replacement_contract],
         ['replacement_chain', replacementChain],
@@ -477,6 +482,11 @@ def dashboard_html(refresh_ms: int) -> str:
       if (feature.blockers.length) body.appendChild(el('p', 'note danger', 'Blocked by: ' + feature.blockers.join('; ')));
       if (feature.open_decisions.length) body.appendChild(el('p', 'note warn', 'Open decisions: ' + feature.open_decisions.join(', ')));
       if (feature.review_findings.length) body.appendChild(el('p', 'note warn', 'Review findings: ' + feature.review_findings.join(', ')));
+      if (feature.review_loop_status && feature.review_loop_status !== 'not_started') {{
+        const blockedBy = (feature.review_loop_blocked_by || []).join(', ');
+        const textValue = feature.review_loop_status + ' round=' + text(feature.review_loop_round) + '/' + text(feature.review_loop_max_rounds) + (blockedBy ? ' blocked_by=' + blockedBy : '');
+        body.appendChild(el('p', 'note', 'Review loop: ' + textValue));
+      }}
       if (feature.depends_on_features.length) body.appendChild(el('p', 'note', 'Depends on: ' + feature.depends_on_features.join(', ')));
       const tasks = el('div', 'tasks');
       if (feature.tasks.length) {{

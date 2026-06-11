@@ -56,6 +56,7 @@ class TaskState:
     svn_base_revision: str | None = None
     svn_url: str | None = None
     git_base_commit: str | None = None
+    review_loop: dict[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -99,6 +100,7 @@ class TaskState:
             "svn_base_revision": self.svn_base_revision,
             "svn_url": self.svn_url,
             "git_base_commit": self.git_base_commit,
+            "review_loop": self.review_loop or {"status": "not_started", "round": 0},
         }
 
     @classmethod
@@ -146,6 +148,9 @@ class TaskState:
             svn_base_revision=data.get("svn_base_revision"),
             svn_url=data.get("svn_url"),
             git_base_commit=data.get("git_base_commit"),
+            review_loop=dict(data["review_loop"])
+            if isinstance(data.get("review_loop"), dict)
+            else {"status": "not_started", "round": 0},
         )
 
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from cowp.review_loop import active_finding_blockers, review_loop_gate_blockers
 from cowp.state import StateStore, TaskState
 
 DEPENDENCY_SATISFIED_STATUS = "merged"
@@ -146,6 +147,7 @@ class WorkflowQueries:
             blockers.append(f"task status is non-mergeable: {state.status}")
         blockers.extend(self.consistency_blockers(task.id))
         blockers.extend(review_finding_blockers(state.task_review_findings if state else []))
+        blockers.extend(review_loop_gate_blockers(state.review_loop if state else None, "task review loop"))
         if review_material_missing(state):
             blockers.append("review material is missing")
             return blockers
@@ -339,28 +341,7 @@ def dependency_mapping_hash(
 
 
 def review_finding_blockers(findings: list[dict] | None) -> list[str]:
-    blockers: list[str] = []
-    for finding in findings or []:
-        finding_id = str(finding.get("id") or "<finding>")
-        status = str(finding.get("status") or "open")
-        if status == "open":
-            blockers.append(f"{finding_id} open")
-        if status == "wontfix" and is_disallowed_wontfix(finding):
-            blockers.append(f"{finding_id} disallowed wontfix")
-        if status != "invalid" and str(finding.get("type") or "") == "boundary":
-            blockers.append(f"{finding_id} active boundary")
-        if status != "invalid" and bool(finding.get("contract_change", False)):
-            blockers.append(f"{finding_id} active contract_change")
-    return blockers
-
-
-def is_disallowed_wontfix(finding: dict[str, Any]) -> bool:
-    severity = str(finding.get("severity") or "").upper()
-    return (
-        severity in {"P0", "P1"}
-        or str(finding.get("type") or "") == "boundary"
-        or bool(finding.get("contract_change", False))
-    )
+    return active_finding_blockers(findings)
 
 
 def review_freshness(state: TaskState | None) -> ReviewFreshness:

@@ -54,7 +54,7 @@ Feature dependencies:
 
 ### Review Result
 
-- `<No unresolved findings for TASK-...>` or `<remaining blockers>`
+- `<No open or active blocking findings for TASK-...>` or `<remaining blockers>`
 
 ## Ready Task Breakdown
 

@@ -90,8 +90,12 @@ Review and finish one task at a time:
 
 ```powershell
 cowp review --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001
+cowp review-loop begin --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001
 cowp finding add --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001 --type bug --severity P2 --message "short finding"
+cowp review-loop record-fix --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001 --summary "fixed RF-001" --file src/example.py
+cowp review --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001
 cowp finding resolve --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001 --finding RF-001 --resolution "fixed and retested"
+cowp review-loop complete --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001
 cowp finish --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001 --reviewed-files src/example.py tests/test_example.py
 ```
 
@@ -126,6 +130,8 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
   commit without a merge.
 - Missing `vcs` defaults to `{"type": "git"}`. Missing `execution` defaults to
   `{"strategy": "worktree_parallel"}`.
+- Missing `review_loop` defaults to
+  `{"max_rounds": 3, "stop_on_decision": true}`.
 - `controller_serial` forces effective parallelism to `1`.
 - `svn_git` requires `controller_serial`, a Git repository, an SVN working copy,
   and `.svn/` not tracked by Git.
@@ -214,6 +220,12 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
   `runs_root/state.json`. Open findings block `finish`; boundary and
   `contract_change` findings remain non-mergeable until reclassified or marked
   invalid with audit evidence.
+- `cowp review-loop begin/record-fix/complete/stop` records the Codex-owned
+  review loop. Codex may fix non-decision findings inside `allowed_files`, must
+  re-run `cowp review` after each fix, and must stop on decision findings such
+  as boundary, contract, API, schema, or scope changes. Use
+  `--requires-decision --decision-reason <text>` to mark explicit decision
+  findings.
 - `finish` requires review material, refuses stale review snapshots, stages only
   reviewed files, and refuses unreviewed changes. Implementation tasks reject
   worker/manual commits made before the controlled finish step. Integration

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from importlib import resources
 import os
 import shutil
@@ -60,6 +61,8 @@ from cowp.planning import (
     add_plan_decision,
     add_plan_finding,
     add_plan_task,
+    begin_plan_review_loop,
+    complete_plan_review_loop,
     export_ready_tasks_many,
     init_plan,
     link_plan_replacement,
@@ -69,11 +72,14 @@ from cowp.planning import (
     plan_next_all_lines,
     plan_next_lines,
     plan_status_lines,
+    record_plan_review_loop_fix,
     require_replan,
     resolve_plan_decision,
     resolve_plan_finding,
     resolve_replan,
     set_plan_status,
+    stop_plan_review_loop,
+    update_plan_finding,
     update_plan_task,
     validate_plan_collection,
     withdraw_plan_task,
@@ -83,10 +89,21 @@ from cowp.queries import (
     review_finding_blockers as query_review_finding_blockers,
     review_freshness,
 )
+from cowp.review_loop import (
+    active_finding_blockers,
+    apply_decision_classification,
+    begin_review_loop,
+    decision_finding_blockers,
+    mark_review_loop_clean,
+    mark_review_loop_fix,
+    review_loop_fingerprint,
+    stop_review_loop,
+    validate_review_loop,
+)
 from cowp.runner import RunnerError, run_tasks
 from cowp.server import ServerError, serve_backlog
 from cowp.state import StateStore, TaskState, now_iso
-from cowp.svngit import ensure_svn_git_start_gate, load_baselines, publish_batch_for_task, run_prepublish_gate
+from cowp.svngit import ensure_svn_git_start_gate, load_baselines, publish_batch_for_task, run_prepublish_gate, save_baselines
 
 START_SKIP_STATUSES = {"worktree_created", "running", "worker_succeeded", "merged", "superseded", "withdrawn"}
 RUN_SKIP_STATUSES = {"worker_succeeded", "merged", "superseded", "withdrawn"}
@@ -94,6 +111,12 @@ FINDING_TYPES = {"bug", "design", "docs", "test", "boundary"}
 FINDING_STATUSES = {"open", "resolved", "invalid", "wontfix"}
 DISALLOWED_WONTFIX_SEVERITIES = {"P0", "P1"}
 REVIEW_MUTATION_STATUSES = {"worker_succeeded", "worker_failed"}
+REVIEW_LOOP_STOP_REASONS = {
+    "blocked_decision",
+    "blocked_replan",
+    "blocked_max_rounds",
+    "blocked_stable_failure",
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -228,7 +251,24 @@ def build_parser() -> argparse.ArgumentParser:
     plan_add_finding.add_argument("--severity", default="P2")
     plan_add_finding.add_argument("--type", default="design")
     plan_add_finding.add_argument("--contract-change", action="store_true")
+    plan_add_finding.add_argument("--requires-decision", action="store_true")
+    plan_add_finding.add_argument("--decision-reason")
     plan_add_finding.set_defaults(func=cmd_plan_add_finding)
+
+    plan_update_finding = plan_sub.add_parser("update-finding", help="update a planning review finding")
+    plan_update_finding.add_argument("--repo", required=True)
+    plan_update_finding.add_argument("--pool-dir")
+    add_single_plan_selection(plan_update_finding)
+    plan_update_finding.add_argument("--finding", required=True)
+    plan_update_finding.add_argument("--message")
+    plan_update_finding.add_argument("--severity")
+    plan_update_finding.add_argument("--type")
+    plan_update_finding.add_argument("--contract-change", action="store_true")
+    plan_update_finding.add_argument("--clear-contract-change", action="store_true")
+    plan_update_finding.add_argument("--requires-decision", action="store_true")
+    plan_update_finding.add_argument("--decision-reason")
+    plan_update_finding.add_argument("--clear-requires-decision", action="store_true")
+    plan_update_finding.set_defaults(func=cmd_plan_update_finding)
 
     plan_resolve_finding = plan_sub.add_parser("resolve-finding", help="resolve a planning review finding")
     plan_resolve_finding.add_argument("--repo", required=True)
@@ -237,6 +277,43 @@ def build_parser() -> argparse.ArgumentParser:
     plan_resolve_finding.add_argument("--finding", required=True)
     plan_resolve_finding.add_argument("--resolution", required=True)
     plan_resolve_finding.set_defaults(func=cmd_plan_resolve_finding)
+
+    plan_review_loop = plan_sub.add_parser("review-loop", help="manage planning review loop state")
+    plan_review_loop_sub = plan_review_loop.add_subparsers(dest="plan_review_loop_command", required=True)
+    plan_review_loop_begin = plan_review_loop_sub.add_parser("begin", help="begin or resume a planning review loop")
+    plan_review_loop_begin.add_argument("--repo", required=True)
+    plan_review_loop_begin.add_argument("--pool-dir")
+    add_single_plan_selection(plan_review_loop_begin)
+    plan_review_loop_begin.add_argument("--max-rounds", type=int)
+    plan_review_loop_begin.add_argument("--stop-on-decision", action="store_true")
+    plan_review_loop_begin.add_argument("--json", action="store_true")
+    plan_review_loop_begin.set_defaults(func=cmd_plan_review_loop_begin)
+
+    plan_review_loop_record = plan_review_loop_sub.add_parser("record-fix", help="record a Codex planning fix attempt")
+    plan_review_loop_record.add_argument("--repo", required=True)
+    plan_review_loop_record.add_argument("--pool-dir")
+    add_single_plan_selection(plan_review_loop_record)
+    plan_review_loop_record.add_argument("--summary", required=True)
+    plan_review_loop_record.add_argument("--file", action="append", default=[])
+    plan_review_loop_record.add_argument("--json", action="store_true")
+    plan_review_loop_record.set_defaults(func=cmd_plan_review_loop_record_fix)
+
+    plan_review_loop_complete = plan_review_loop_sub.add_parser("complete", help="mark a planning review loop clean")
+    plan_review_loop_complete.add_argument("--repo", required=True)
+    plan_review_loop_complete.add_argument("--pool-dir")
+    add_single_plan_selection(plan_review_loop_complete)
+    plan_review_loop_complete.add_argument("--json", action="store_true")
+    plan_review_loop_complete.set_defaults(func=cmd_plan_review_loop_complete)
+
+    plan_review_loop_stop_cmd = plan_review_loop_sub.add_parser("stop", help="stop a planning review loop on a blocker")
+    plan_review_loop_stop_cmd.add_argument("--repo", required=True)
+    plan_review_loop_stop_cmd.add_argument("--pool-dir")
+    add_single_plan_selection(plan_review_loop_stop_cmd)
+    plan_review_loop_stop_cmd.add_argument("--reason", required=True, choices=sorted(REVIEW_LOOP_STOP_REASONS))
+    plan_review_loop_stop_cmd.add_argument("--blocker", action="append", default=[])
+    plan_review_loop_stop_cmd.add_argument("--message", required=True)
+    plan_review_loop_stop_cmd.add_argument("--json", action="store_true")
+    plan_review_loop_stop_cmd.set_defaults(func=cmd_plan_review_loop_stop)
 
     plan_set_status = plan_sub.add_parser("set-status", help="change feature planning status")
     plan_set_status.add_argument("--repo", required=True)
@@ -331,6 +408,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_repo_manifest(prepublish)
     prepublish.add_argument("--batch")
     prepublish.add_argument("--acceptance-command")
+    prepublish.add_argument("--loop", action="store_true")
     prepublish.set_defaults(func=cmd_prepublish)
 
     review = sub.add_parser("review", help="print review material for one task")
@@ -341,6 +419,39 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--files", action="store_true", help="print changed file paths without full diff")
     review.add_argument("--file", action="append", default=[], help="print diff for one reviewed path; may be repeated")
     review.set_defaults(func=cmd_review)
+
+    review_loop = sub.add_parser("review-loop", help="manage task review loop state")
+    review_loop_sub = review_loop.add_subparsers(dest="review_loop_command", required=True)
+    review_loop_begin = review_loop_sub.add_parser("begin", help="begin or resume a task review loop")
+    add_repo_manifest(review_loop_begin)
+    review_loop_begin.add_argument("--task", required=True)
+    review_loop_begin.add_argument("--max-rounds", type=int)
+    review_loop_begin.add_argument("--stop-on-decision", action="store_true")
+    review_loop_begin.add_argument("--json", action="store_true")
+    review_loop_begin.set_defaults(func=cmd_review_loop_begin)
+
+    review_loop_record = review_loop_sub.add_parser("record-fix", help="record a Codex task fix attempt")
+    add_repo_manifest(review_loop_record)
+    review_loop_record.add_argument("--task", required=True)
+    review_loop_record.add_argument("--summary", required=True)
+    review_loop_record.add_argument("--file", action="append", default=[])
+    review_loop_record.add_argument("--json", action="store_true")
+    review_loop_record.set_defaults(func=cmd_review_loop_record_fix)
+
+    review_loop_complete = review_loop_sub.add_parser("complete", help="mark a task review loop clean")
+    add_repo_manifest(review_loop_complete)
+    review_loop_complete.add_argument("--task", required=True)
+    review_loop_complete.add_argument("--json", action="store_true")
+    review_loop_complete.set_defaults(func=cmd_review_loop_complete)
+
+    review_loop_stop_cmd = review_loop_sub.add_parser("stop", help="stop a task review loop on a blocker")
+    add_repo_manifest(review_loop_stop_cmd)
+    review_loop_stop_cmd.add_argument("--task", required=True)
+    review_loop_stop_cmd.add_argument("--reason", required=True, choices=sorted(REVIEW_LOOP_STOP_REASONS))
+    review_loop_stop_cmd.add_argument("--blocker", action="append", default=[])
+    review_loop_stop_cmd.add_argument("--message", required=True)
+    review_loop_stop_cmd.add_argument("--json", action="store_true")
+    review_loop_stop_cmd.set_defaults(func=cmd_review_loop_stop)
 
     finding = sub.add_parser("finding", help="manage execution review findings")
     finding_sub = finding.add_subparsers(dest="finding_command", required=True)
@@ -353,6 +464,8 @@ def build_parser() -> argparse.ArgumentParser:
     finding_add.add_argument("--message", required=True)
     finding_add.add_argument("--file", action="append", default=[])
     finding_add.add_argument("--contract-change", action="store_true")
+    finding_add.add_argument("--requires-decision", action="store_true")
+    finding_add.add_argument("--decision-reason")
     finding_add.set_defaults(func=cmd_finding_add)
 
     finding_update = finding_sub.add_parser("update", help="update a review finding")
@@ -366,6 +479,9 @@ def build_parser() -> argparse.ArgumentParser:
     finding_update.add_argument("--resolution")
     finding_update.add_argument("--contract-change", action="store_true")
     finding_update.add_argument("--clear-contract-change", action="store_true")
+    finding_update.add_argument("--requires-decision", action="store_true")
+    finding_update.add_argument("--decision-reason")
+    finding_update.add_argument("--clear-requires-decision", action="store_true")
     finding_update.set_defaults(func=cmd_finding_update)
 
     finding_resolve = finding_sub.add_parser("resolve", help="resolve a review finding with audit evidence")
@@ -571,8 +687,29 @@ def cmd_plan_add_finding(args: argparse.Namespace) -> int:
         severity=args.severity,
         finding_type=args.type,
         contract_change=args.contract_change,
+        requires_decision=args.requires_decision,
+        decision_reason=args.decision_reason,
     )
     print(f"{finding_id}: added")
+    return 0
+
+
+def cmd_plan_update_finding(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    update_plan_finding(
+        plan,
+        args.finding,
+        severity=args.severity,
+        finding_type=args.type,
+        message=args.message,
+        contract_change=args.contract_change,
+        clear_contract_change=args.clear_contract_change,
+        requires_decision=args.requires_decision,
+        decision_reason=args.decision_reason,
+        clear_requires_decision=args.clear_requires_decision,
+    )
+    print(f"{args.finding}: updated")
     return 0
 
 
@@ -581,6 +718,43 @@ def cmd_plan_resolve_finding(args: argparse.Namespace) -> int:
     plan = selected_plan(config, args)
     resolve_plan_finding(plan, args.finding, args.resolution)
     print(f"{args.finding}: resolved")
+    return 0
+
+
+def cmd_plan_review_loop_begin(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    loop = begin_plan_review_loop(
+        config,
+        plan,
+        max_rounds=args.max_rounds,
+        stop_on_decision=args.stop_on_decision,
+    )
+    print_review_loop(plan.feature_id, loop, json_output=args.json, include_max=True)
+    return 0
+
+
+def cmd_plan_review_loop_record_fix(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    loop = record_plan_review_loop_fix(config, plan, args.summary, files=tuple(args.file or ()))
+    print_review_loop(plan.feature_id, loop, json_output=args.json)
+    return 0
+
+
+def cmd_plan_review_loop_complete(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    loop = complete_plan_review_loop(config, plan)
+    print_review_loop(plan.feature_id, loop, json_output=args.json)
+    return 0
+
+
+def cmd_plan_review_loop_stop(args: argparse.Namespace) -> int:
+    config = load_project_config(args.repo, args.pool_dir)
+    plan = selected_plan(config, args)
+    loop = stop_plan_review_loop(plan, args.reason, tuple(args.blocker or ()), args.message)
+    print_review_loop(plan.feature_id, loop, json_output=args.json, include_round=False)
     return 0
 
 
@@ -904,12 +1078,48 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_prepublish(args: argparse.Namespace) -> int:
     config, manifest = load_inputs(args)
-    record = run_prepublish_gate(
-        config,
-        manifest,
-        batch_id=args.batch,
-        acceptance_command=args.acceptance_command,
-    )
+    loop_batch = None
+    if args.loop:
+        loop_batch = prepublish_loop_batch(config, args.batch)
+        if loop_batch:
+            records = load_baselines(config)
+            record = records.get(loop_batch)
+            if record is not None:
+                now = now_for_cli()
+                record["review_loop"] = begin_review_loop(
+                    record.get("review_loop"),
+                    config.review_loop.max_rounds,
+                    now,
+                )
+                save_baselines(config, records)
+    try:
+        record = run_prepublish_gate(
+            config,
+            manifest,
+            batch_id=args.batch,
+            acceptance_command=args.acceptance_command,
+        )
+    except GitError as exc:
+        if args.loop and loop_batch:
+            records = load_baselines(config)
+            record = records.get(loop_batch)
+            if record is not None:
+                now = now_for_cli()
+                record["review_loop"] = stop_review_loop(
+                    record.get("review_loop"),
+                    "blocked_decision",
+                    [str(exc)],
+                    "prepublish requires controller decision or fix",
+                    now,
+                )
+                save_baselines(config, records)
+        raise
+    if args.loop:
+        records = load_baselines(config)
+        updated = records.get(str(record["publish_batch"]))
+        if updated is not None:
+            updated["review_loop"] = mark_review_loop_clean(updated.get("review_loop"), now_for_cli())
+            save_baselines(config, records)
     print(f"{record['publish_batch']}: prepublish_ready")
     print(f"  report: {record.get('prepublish_report_path')}")
     return 0
@@ -1005,6 +1215,130 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review_loop_begin(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    task = manifest.get_task(args.task)
+    store = StateStore(config.runs_root)
+    state = ensure_review_mutation_allowed(store, task, "review-loop begin")
+    now = now_for_cli()
+    decision_blockers = decision_finding_blockers(state.task_review_findings or [])
+    if (config.review_loop.stop_on_decision or args.stop_on_decision) and decision_blockers:
+        loop = stop_review_loop(
+            state.review_loop,
+            "blocked_decision",
+            decision_blockers,
+            "decision finding blocks review loop",
+            now,
+        )
+        store.update(task.id, review_loop=loop)
+        store.append_audit_event(task.id, "review-loop stop", "blocked_decision", blockers=decision_blockers)
+        print_review_loop(task.id, loop, json_output=args.json, include_round=False)
+        return 0
+    loop = begin_review_loop(state.review_loop, args.max_rounds or config.review_loop.max_rounds, now)
+    store.update(task.id, review_loop=loop)
+    store.append_audit_event(task.id, "review-loop begin", f"round {loop['round']}", review_loop=loop)
+    print_review_loop(task.id, loop, json_output=args.json, include_max=True)
+    return 0
+
+
+def cmd_review_loop_record_fix(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    task = manifest.get_task(args.task)
+    store = StateStore(config.runs_root)
+    state = ensure_review_mutation_allowed(store, task, "review-loop record-fix")
+    changed_files = normalize_review_loop_files(task, args.file or ())
+    worktree = task_workspace_for_state(config, task, state)
+    current_hash = review_snapshot_hash_for_state(config, task, state, worktree)
+    current_sha = head_sha(worktree)
+    fingerprint = review_loop_fingerprint(
+        state.task_review_findings or [],
+        snapshot_hash=current_hash,
+        changed_files=changed_files,
+    )
+    blockers = active_finding_blockers(state.task_review_findings or [])
+    previous_fingerprint = (state.review_loop or {}).get("last_fix_fingerprint") if state.review_loop else None
+    now = now_for_cli()
+    if blockers and previous_fingerprint == fingerprint:
+        loop = stop_review_loop(
+            state.review_loop,
+            "blocked_stable_failure",
+            blockers,
+            "same review blockers repeated after a fix attempt",
+            now,
+        )
+        store.update(task.id, review_loop=loop, current_snapshot_hash=current_hash)
+        store.append_audit_event(
+            task.id,
+            "review-loop stop",
+            "blocked_stable_failure",
+            blockers=blockers,
+            fingerprint=fingerprint,
+        )
+        print_review_loop(task.id, loop, json_output=args.json, include_round=False)
+        return 0
+    loop = mark_review_loop_fix(
+        state.review_loop,
+        args.summary,
+        changed_files,
+        now,
+        current_sha=current_sha,
+        fingerprint=fingerprint,
+    )
+    store.update(task.id, review_loop=loop, current_snapshot_hash=current_hash)
+    store.append_audit_event(
+        task.id,
+        "review-loop record-fix",
+        args.summary,
+        files=changed_files,
+        current_sha=current_sha,
+        snapshot_hash=current_hash,
+        fingerprint=fingerprint,
+    )
+    print_review_loop(task.id, loop, json_output=args.json)
+    return 0
+
+
+def cmd_review_loop_complete(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    task = manifest.get_task(args.task)
+    store = StateStore(config.runs_root)
+    state = ensure_review_mutation_allowed(store, task, "review-loop complete")
+    blockers = review_finding_blockers(state.task_review_findings or [])
+    if blockers:
+        raise ConfigError(f"{task.id}: review loop is blocked: {'; '.join(blockers)}")
+    worktree = task_workspace_for_state(config, task, state)
+    current_hash = review_snapshot_hash_for_state(config, task, state, worktree)
+    if not state.review_snapshot_hash:
+        raise ConfigError(f"{task.id}: review loop complete requires review material; run cowp review first")
+    if current_hash != state.review_snapshot_hash:
+        raise ConfigError(f"{task.id}: review loop complete requires a fresh review snapshot; run cowp review again")
+    now = now_for_cli()
+    loop = mark_review_loop_clean(state.review_loop, now)
+    store.update(task.id, review_loop=loop, current_snapshot_hash=current_hash)
+    store.append_audit_event(task.id, "review-loop complete", f"round {loop.get('round', 0)} clean")
+    print_review_loop(task.id, loop, json_output=args.json)
+    return 0
+
+
+def cmd_review_loop_stop(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    task = manifest.get_task(args.task)
+    store = StateStore(config.runs_root)
+    state = get_or_create_task_state(store, task.id)
+    now = now_for_cli()
+    loop = stop_review_loop(state.review_loop, args.reason, tuple(args.blocker or ()), args.message, now)
+    store.update(task.id, review_loop=loop)
+    store.append_audit_event(
+        task.id,
+        "review-loop stop",
+        args.reason,
+        blockers=list(args.blocker or ()),
+        message=args.message,
+    )
+    print_review_loop(task.id, loop, json_output=args.json, include_round=False)
+    return 0
+
+
 def cmd_finding_add(args: argparse.Namespace) -> int:
     config, manifest = load_inputs(args)
     task = manifest.get_task(args.task)
@@ -1019,9 +1353,19 @@ def cmd_finding_add(args: argparse.Namespace) -> int:
         "message": args.message,
         "files": [str(item).replace("\\", "/") for item in args.file],
         "contract_change": bool(args.contract_change),
+        "loop_round": int((state.review_loop or {}).get("round") or 0),
         "created_at": now_for_cli(),
         "updated_at": now_for_cli(),
     }
+    try:
+        apply_decision_classification(
+            finding,
+            requires_decision=args.requires_decision,
+            decision_reason=args.decision_reason,
+            explicit_requires_decision=args.requires_decision,
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     findings.append(finding)
     store.update(args.task, task_review_findings=findings, review_status="blocked")
     store.append_audit_event(args.task, "finding add", f"added {finding['id']}", finding=finding)
@@ -1053,6 +1397,16 @@ def cmd_finding_update(args: argparse.Namespace) -> int:
         finding["contract_change"] = True
     if args.clear_contract_change:
         finding["contract_change"] = False
+    try:
+        apply_decision_classification(
+            finding,
+            requires_decision=args.requires_decision,
+            decision_reason=args.decision_reason,
+            clear_requires_decision=args.clear_requires_decision,
+            explicit_requires_decision=args.requires_decision,
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     finding["updated_at"] = now_for_cli()
     if finding.get("status") == "wontfix" and is_disallowed_wontfix(finding):
         raise ConfigError(f"{finding['id']}: wontfix is not allowed for this finding")
@@ -1232,6 +1586,18 @@ def load_inputs(args: argparse.Namespace) -> tuple[ProjectConfig, Manifest]:
     return config, manifest
 
 
+def prepublish_loop_batch(config: ProjectConfig, requested_batch: str | None) -> str | None:
+    if requested_batch:
+        return requested_batch
+    records = load_baselines(config)
+    active = [
+        batch
+        for batch, record in records.items()
+        if record.get("state") in {"active", "prepublish_ready"}
+    ]
+    return active[0] if len(active) == 1 else None
+
+
 def extend_manifest_workflow_validation(config: ProjectConfig, manifest: Manifest, result) -> None:
     plans = load_all_plans(config)
     queries = WorkflowQueries(config, manifest=manifest, plans=plans)
@@ -1240,6 +1606,9 @@ def extend_manifest_workflow_validation(config: ProjectConfig, manifest: Manifes
         if getattr(task, "withdrawn", False) and not getattr(task, "active", True):
             continue
         state = queries.states.get(task.id)
+        if state:
+            for error in validate_review_loop(state.review_loop):
+                result.errors.append(f"{task.id}: {error}")
         if state and state.status == "merged":
             continue
         for blocker in queries.run_blockers(task, known_task_ids=known_task_ids):
@@ -1652,6 +2021,24 @@ def reviewed_path_allowed(path: str, allowed_files: tuple[str, ...]) -> bool:
     )
 
 
+def normalize_review_loop_files(task, files: list[str] | tuple[str, ...]) -> list[str]:
+    normalized: list[str] = []
+    for raw in files:
+        path = str(raw).replace("\\", "/").strip()
+        if not path:
+            continue
+        normalized_path = normalize_review_path(path)
+        if not normalized_path:
+            raise ConfigError(f"{path}: review-loop fix file must be a relative repository path")
+        if task.allowed_files and not paths_overlap([normalized_path], task.allowed_files):
+            raise ConfigError(f"{path}: review-loop fix file is outside task allowed_files")
+        if not task.allowed_files and not is_integration_task(task):
+            raise ConfigError(f"{task.id}: review-loop record-fix requires allowed_files for file tracking")
+        if normalized_path not in normalized:
+            normalized.append(normalized_path)
+    return normalized
+
+
 def normalize_review_path(path: str) -> str:
     raw = str(path).replace("\\", "/").strip()
     if not raw or Path(raw).is_absolute() or raw.startswith("/"):
@@ -1791,6 +2178,25 @@ def next_finish_attempt_id(attempts: list[dict]) -> str:
 
 def now_for_cli() -> str:
     return now_iso()
+
+
+def print_review_loop(
+    item_id: str,
+    loop: dict,
+    *,
+    json_output: bool = False,
+    include_max: bool = False,
+    include_round: bool = True,
+) -> None:
+    if json_output:
+        print(json.dumps({"id": item_id, "review_loop": loop}, ensure_ascii=False, sort_keys=True))
+        return
+    text = f"{item_id}: review-loop {loop['status']}"
+    if include_max:
+        text += f" round={loop['round']}/{loop['max_rounds']}"
+    elif include_round:
+        text += f" round={loop['round']}"
+    print(text)
 
 
 def print_validation(result) -> None:

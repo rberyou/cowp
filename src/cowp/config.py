@@ -62,6 +62,12 @@ class ExecutionConfig:
 
 
 @dataclass(frozen=True)
+class ReviewLoopConfig:
+    max_rounds: int = 3
+    stop_on_decision: bool = True
+
+
+@dataclass(frozen=True)
 class WorkerProfile:
     id: str
     agent: str | None = None
@@ -81,6 +87,7 @@ class ProjectConfig:
     max_parallel: int
     vcs: VcsConfig
     execution: ExecutionConfig
+    review_loop: ReviewLoopConfig
     opencode: OpencodeConfig
     acceptance: AcceptanceConfig
     setup: SetupConfig
@@ -151,6 +158,7 @@ def default_config_data(repo: Path, external_pool: bool = False) -> dict[str, An
         "max_parallel": 2,
         "vcs": {"type": VCS_GIT},
         "execution": {"strategy": EXECUTION_WORKTREE_PARALLEL, "max_parallel": 2},
+        "review_loop": {"max_rounds": 3, "stop_on_decision": True},
         "opencode": {"pure": True, "default_agent": "build"},
         "acceptance": {
             "worker": None,
@@ -236,6 +244,7 @@ def parse_project_config(
     vcs_data = data.get("vcs") or {}
     svn_data = vcs_data.get("svn") or {}
     execution_data = data.get("execution") or {}
+    review_loop_data = data.get("review_loop") or {}
     strategy = str(execution_data.get("strategy") or EXECUTION_WORKTREE_PARALLEL)
     configured_parallel = int(execution_data.get("max_parallel") or data.get("max_parallel") or 1)
     effective_parallel = 1 if strategy == EXECUTION_CONTROLLER_SERIAL else max(1, configured_parallel)
@@ -262,6 +271,10 @@ def parse_project_config(
         execution=ExecutionConfig(
             strategy=strategy,
             max_parallel=effective_parallel,
+        ),
+        review_loop=ReviewLoopConfig(
+            max_rounds=max(1, int(review_loop_data.get("max_rounds") or 3)),
+            stop_on_decision=bool(review_loop_data.get("stop_on_decision", True)),
         ),
         opencode=OpencodeConfig(
             pure=bool(opencode_data.get("pure", True)),
