@@ -263,7 +263,9 @@ def dashboard_html(refresh_ms: int) -> str:
       background: var(--badge);
       padding: 2px 7px;
       font-size: 11px;
-      white-space: nowrap;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      white-space: normal;
     }}
     .badge.failed,
     .badge.worker_failed {{
@@ -308,16 +310,44 @@ def dashboard_html(refresh_ms: int) -> str:
       padding-top: 0;
     }}
     .task-main {{
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: start;
       gap: 8px;
       font-size: 13px;
       font-weight: 600;
     }}
+    .task-title {{
+      min-width: 0;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }}
+    .task-badges,
+    .task-chip-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      min-width: 0;
+    }}
+    .task-badges {{
+      justify-content: flex-end;
+      max-width: 110px;
+    }}
+    .task-chip-row {{
+      margin-top: 5px;
+    }}
+    .task-meta {{
+      margin-top: 5px;
+    }}
+    .task-meta summary {{
+      padding: 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+    }}
     .task-grid {{
       display: grid;
-      grid-template-columns: auto 1fr;
+      grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
       gap: 2px 8px;
       margin-top: 5px;
       color: var(--muted);
@@ -387,6 +417,20 @@ def dashboard_html(refresh_ms: int) -> str:
       return node;
     }}
 
+    function hasValue(value) {{
+      if (Array.isArray(value)) return value.length > 0;
+      return value !== null && value !== undefined && value !== '' && value !== '-';
+    }}
+
+    function badge(value, extraClass) {{
+      return el('span', 'badge' + (extraClass ? ' ' + extraClass : ''), value);
+    }}
+
+    function metaBadge(label, value) {{
+      if (!hasValue(value)) return null;
+      return badge(label + ': ' + value);
+    }}
+
     function renderList(target, items) {{
       target.replaceChildren();
       if (!items.length) {{
@@ -399,25 +443,47 @@ def dashboard_html(refresh_ms: int) -> str:
     function renderTask(task) {{
       const root = el('div', 'task');
       const main = el('div', 'task-main');
-      main.appendChild(el('span', '', task.task_id + ' ' + task.title));
-      main.appendChild(el('span', 'badge', task.kind || 'implementation'));
-      main.appendChild(el('span', 'badge', task.executor || 'worker'));
-      main.appendChild(el('span', 'badge ' + text(task.execution_status), task.execution_status));
+      main.appendChild(el('span', 'task-title', task.task_id + ' ' + task.title));
+      const statusBadges = el('div', 'task-badges');
+      const primaryStatus = hasValue(task.execution_status) && task.execution_status !== 'planned'
+        ? task.execution_status
+        : task.plan_status;
+      statusBadges.appendChild(badge(primaryStatus || 'planned', text(primaryStatus || 'planned')));
+      main.appendChild(statusBadges);
       root.appendChild(main);
-      const grid = el('div', 'task-grid');
+
       const dependsOn = (task.depends_on || []).join(', ');
       const declaredDependsOn = (task.declared_depends_on || []).join(', ');
       const effectiveDependsOn = (task.effective_depends_on || []).join(', ');
       const blockers = (task.blockers || []).join('; ');
       const reviewFindings = (task.review_findings || []).join('; ');
       const reviewLoopBlockedBy = (task.review_loop_blocked_by || []).join(', ');
+      const reviewLoopNeedsReview = task.review_loop_needs_review ? ' needs_review=true' : '';
       const reviewLoop = task.review_loop_status && task.review_loop_status !== 'not_started'
-        ? task.review_loop_status + ' round=' + text(task.review_loop_round) + '/' + text(task.review_loop_max_rounds) + (reviewLoopBlockedBy ? ' blocked_by=' + reviewLoopBlockedBy : '')
+        ? task.review_loop_status + ' round=' + text(task.review_loop_round) + '/' + text(task.review_loop_max_rounds) + (reviewLoopBlockedBy ? ' blocked_by=' + reviewLoopBlockedBy : '') + reviewLoopNeedsReview
         : '';
       const withdrawnReplacements = (task.withdrawn_replacement_tasks || []).join(', ');
       const replacementChain = (task.replacement_chain || []).join(' -> ');
       const sourceBranches = (task.source_branches || []).join(', ');
       const mergeOrder = (task.merge_order || []).join(', ');
+
+      const chipRow = el('div', 'task-chip-row');
+      for (const chip of [
+        metaBadge('kind', task.kind || 'implementation'),
+        metaBadge('executor', task.executor || 'worker'),
+        metaBadge('worker', task.worker),
+        task.plan_status && task.plan_status !== primaryStatus ? metaBadge('plan', task.plan_status) : null,
+      ]) {{
+        if (chip) chipRow.appendChild(chip);
+      }}
+      if (chipRow.childNodes.length) root.appendChild(chipRow);
+      if (blockers) root.appendChild(el('p', 'note warn', 'Blocked by: ' + blockers));
+      if (reviewFindings) root.appendChild(el('p', 'note danger', 'Review findings: ' + reviewFindings));
+      if (reviewLoop) root.appendChild(el('p', 'note', 'Task review loop: ' + reviewLoop));
+
+      const meta = el('details', 'task-meta');
+      meta.appendChild(el('summary', '', 'Details'));
+      const grid = el('div', 'task-grid');
       const pairs = [
         ['plan', task.plan_status],
         ['vcs', task.vcs_type],
@@ -429,7 +495,7 @@ def dashboard_html(refresh_ms: int) -> str:
         ['effective_depends_on', effectiveDependsOn],
         ['blocked_by', blockers],
         ['review_findings', reviewFindings],
-        ['review_loop', reviewLoop],
+        ['task_review_loop', reviewLoop],
         ['superseded_by', task.superseded_by],
         ['replacement_contract', task.replacement_contract],
         ['replacement_chain', replacementChain],
@@ -460,10 +526,12 @@ def dashboard_html(refresh_ms: int) -> str:
         ['final', task.final_diff_path],
       ];
       for (const [key, value] of pairs) {{
+        if (!hasValue(value) && !['allowed'].includes(key)) continue;
         grid.appendChild(el('div', '', key));
         grid.appendChild(el('div', '', value));
       }}
-      root.appendChild(grid);
+      meta.appendChild(grid);
+      root.appendChild(meta);
       return root;
     }}
 
@@ -484,8 +552,9 @@ def dashboard_html(refresh_ms: int) -> str:
       if (feature.review_findings.length) body.appendChild(el('p', 'note warn', 'Review findings: ' + feature.review_findings.join(', ')));
       if (feature.review_loop_status && feature.review_loop_status !== 'not_started') {{
         const blockedBy = (feature.review_loop_blocked_by || []).join(', ');
-        const textValue = feature.review_loop_status + ' round=' + text(feature.review_loop_round) + '/' + text(feature.review_loop_max_rounds) + (blockedBy ? ' blocked_by=' + blockedBy : '');
-        body.appendChild(el('p', 'note', 'Review loop: ' + textValue));
+        const needsReview = feature.review_loop_needs_review ? ' needs_review=true' : '';
+        const textValue = feature.review_loop_status + ' round=' + text(feature.review_loop_round) + '/' + text(feature.review_loop_max_rounds) + (blockedBy ? ' blocked_by=' + blockedBy : '') + needsReview;
+        body.appendChild(el('p', 'note', 'Plan review loop: ' + textValue));
       }}
       if (feature.depends_on_features.length) body.appendChild(el('p', 'note', 'Depends on: ' + feature.depends_on_features.join(', ')));
       const tasks = el('div', 'tasks');

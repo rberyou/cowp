@@ -46,6 +46,7 @@ class BacklogTask:
     review_loop_round: int | None
     review_loop_max_rounds: int | None
     review_loop_blocked_by: tuple[str, ...]
+    review_loop_needs_review: bool
     execution_status: str
     superseded_by: str | None
     replacement_contract: str | None
@@ -92,6 +93,7 @@ class BacklogFeature:
     review_loop_round: int | None
     review_loop_max_rounds: int | None
     review_loop_blocked_by: tuple[str, ...]
+    review_loop_needs_review: bool
     tasks: tuple[BacklogTask, ...]
 
 
@@ -250,6 +252,7 @@ def _feature_snapshot(
         review_loop_round=_loop_round(plan.review_loop),
         review_loop_max_rounds=_loop_max_rounds(plan.review_loop),
         review_loop_blocked_by=_loop_blocked_by(plan.review_loop),
+        review_loop_needs_review=_loop_needs_review(plan.review_loop),
         tasks=tasks,
     )
 
@@ -291,6 +294,7 @@ def _task_snapshot(
         review_loop_round=_loop_round(state.review_loop if state else None),
         review_loop_max_rounds=_loop_max_rounds(state.review_loop if state else None),
         review_loop_blocked_by=_loop_blocked_by(state.review_loop if state else None),
+        review_loop_needs_review=_loop_needs_review(state.review_loop if state else None),
         execution_status=state.status if state else "planned",
         superseded_by=task.superseded_by,
         replacement_contract=task.replacement_contract if task.superseded_by else None,
@@ -424,6 +428,7 @@ def _unassigned_manifest_tasks(
                 review_loop_round=_loop_round(state.review_loop if state else None),
                 review_loop_max_rounds=_loop_max_rounds(state.review_loop if state else None),
                 review_loop_blocked_by=_loop_blocked_by(state.review_loop if state else None),
+                review_loop_needs_review=_loop_needs_review(state.review_loop if state else None),
                 execution_status=state.status if state else "planned",
                 superseded_by=None,
                 replacement_contract=None,
@@ -488,7 +493,9 @@ def _feature_lines(feature: BacklogFeature) -> list[str]:
         loop_text = f"{feature.review_loop_status} round={feature.review_loop_round}/{feature.review_loop_max_rounds}"
         if feature.review_loop_blocked_by:
             loop_text += " blocked_by=" + ",".join(feature.review_loop_blocked_by)
-        lines.append("    review_loop: " + loop_text)
+        if feature.review_loop_needs_review:
+            loop_text += " needs_review=true"
+        lines.append("    plan_review_loop: " + loop_text)
     for task in feature.tasks:
         lines.append(_task_line(task))
         if task.depends_on:
@@ -538,7 +545,9 @@ def _feature_lines(feature: BacklogFeature) -> list[str]:
             loop_text = f"{task.review_loop_status} round={task.review_loop_round}/{task.review_loop_max_rounds}"
             if task.review_loop_blocked_by:
                 loop_text += " blocked_by=" + ",".join(task.review_loop_blocked_by)
-            lines.append("      review_loop: " + loop_text)
+            if task.review_loop_needs_review:
+                loop_text += " needs_review=true"
+            lines.append("      task_review_loop: " + loop_text)
     return lines
 
 
@@ -666,6 +675,10 @@ def _loop_blocked_by(loop: dict[str, Any] | None) -> tuple[str, ...]:
     return tuple(str(item) for item in loop.get("blocked_by") or [])
 
 
+def _loop_needs_review(loop: dict[str, Any] | None) -> bool:
+    return bool(loop.get("needs_review")) if isinstance(loop, dict) else False
+
+
 def _column_id(title: str) -> str:
     return title.lower().replace(" ", "-")
 
@@ -684,6 +697,7 @@ def _feature_to_dict(feature: BacklogFeature) -> dict[str, Any]:
         "review_loop_round": feature.review_loop_round,
         "review_loop_max_rounds": feature.review_loop_max_rounds,
         "review_loop_blocked_by": list(feature.review_loop_blocked_by),
+        "review_loop_needs_review": feature.review_loop_needs_review,
         "tasks": [_task_to_dict(task) for task in feature.tasks],
     }
 
@@ -708,6 +722,7 @@ def _task_to_dict(task: BacklogTask) -> dict[str, Any]:
         "review_loop_round": task.review_loop_round,
         "review_loop_max_rounds": task.review_loop_max_rounds,
         "review_loop_blocked_by": list(task.review_loop_blocked_by),
+        "review_loop_needs_review": task.review_loop_needs_review,
         "execution_status": task.execution_status,
         "superseded_by": task.superseded_by,
         "replacement_contract": task.replacement_contract,

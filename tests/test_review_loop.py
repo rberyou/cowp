@@ -6,7 +6,7 @@ from pathlib import Path
 from cowp.cli import main
 from cowp.config import default_config_data, load_project_config, parse_project_config, write_json
 from cowp.gitops import task_worktree
-from cowp.review_loop import begin_review_loop, mark_review_loop_fix
+from cowp.review_loop import begin_review_loop, mark_review_loop_fix, mark_review_loop_reviewed
 from cowp.state import StateStore
 from tests.conftest import run, write_manifest
 
@@ -39,6 +39,56 @@ def test_review_loop_begin_after_fix_starts_next_round():
 
     assert loop["status"] == "re_reviewing"
     assert loop["round"] == 2
+    assert loop["needs_review"] is True
+
+
+def test_review_loop_review_after_fix_starts_next_round():
+    loop = begin_review_loop(None, 3, "now-1")
+    loop = mark_review_loop_fix(loop, "fixed", ["src/example.py"], "now-2")
+    loop = mark_review_loop_reviewed(loop, 3, "now-3", snapshot_hash="abc")
+
+    assert loop["status"] == "re_reviewing"
+    assert loop["round"] == 2
+    assert loop["needs_review"] is False
+    assert loop["last_review_snapshot_hash"] == "abc"
+
+
+def test_review_loop_review_after_explicit_re_review_begin_does_not_double_count():
+    loop = begin_review_loop(None, 3, "now-1")
+    loop = mark_review_loop_fix(loop, "fixed", ["src/example.py"], "now-2")
+    loop = begin_review_loop(loop, 3, "now-3")
+    loop = mark_review_loop_reviewed(loop, 3, "now-4", snapshot_hash="abc")
+
+    assert loop["status"] == "re_reviewing"
+    assert loop["round"] == 2
+    assert loop["needs_review"] is False
+    assert loop["last_review_snapshot_hash"] == "abc"
+
+
+def test_review_loop_review_after_max_round_fix_blocks_at_max_round():
+    loop = begin_review_loop(None, 3, "now-1")
+    loop = mark_review_loop_fix(loop, "fixed 1", ["src/example.py"], "now-2")
+    loop = mark_review_loop_reviewed(loop, 3, "now-3", snapshot_hash="abc")
+    loop = mark_review_loop_fix(loop, "fixed 2", ["src/example.py"], "now-4")
+    loop = mark_review_loop_reviewed(loop, 3, "now-5", snapshot_hash="def")
+    loop = mark_review_loop_fix(loop, "fixed 3", ["src/example.py"], "now-6")
+    loop = mark_review_loop_reviewed(loop, 3, "now-7", snapshot_hash="ghi")
+
+    assert loop["status"] == "blocked_max_rounds"
+    assert loop["round"] == 3
+    assert loop["max_rounds"] == 3
+    assert loop["stop_reason"] == "max review rounds exceeded"
+
+
+def test_review_loop_explicit_begin_after_fix_still_requires_review_snapshot():
+    loop = begin_review_loop(None, 3, "now-1")
+    loop = mark_review_loop_fix(loop, "fixed", ["src/example.py"], "now-2")
+    loop = begin_review_loop(loop, 3, "now-3")
+
+    assert loop["status"] == "re_reviewing"
+    assert loop["round"] == 2
+    assert loop["needs_review"] is True
+    assert "last_review_snapshot_at" not in loop
 
 
 def test_planning_review_loop_stops_on_decision_finding(git_repo: Path, workerpool_config: Path):
@@ -184,9 +234,62 @@ def test_task_review_loop_enforces_allowed_files_and_fresh_review(
         == 1
     )
     assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    state = StateStore(config.runs_root).load()["TASK-001"]
+    assert state.review_loop["status"] == "re_reviewing"
+    assert state.review_loop["round"] == 2
     assert (
         main(["review-loop", "complete", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"])
         == 0
+    )
+    state = StateStore(config.runs_root).load()["TASK-001"]
+    assert state.review_loop["status"] == "clean"
+    assert state.review_loop["round"] == 2
+
+
+def test_task_review_loop_complete_rejects_begin_without_review_after_fix(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "begin without review",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 0
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    assert main(["review-loop", "begin", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    assert (
+        main(
+            [
+                "review-loop",
+                "record-fix",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--summary",
+                "recorded no-op fix",
+                "--file",
+                "src/example.py",
+            ]
+        )
+        == 0
+    )
+    assert main(["review-loop", "begin", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    assert (
+        main(["review-loop", "complete", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"])
+        == 1
     )
 
 

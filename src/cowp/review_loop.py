@@ -56,6 +56,7 @@ def begin_review_loop(value: Any, max_rounds: int, now: str) -> dict[str, Any]:
     if not active:
         loop["round"] += 1
     if loop["round"] > loop["max_rounds"]:
+        loop["round"] = loop["max_rounds"]
         return stop_review_loop(loop, "blocked_max_rounds", [], "max review rounds exceeded", now)
     loop["status"] = "re_reviewing" if loop["round"] > 1 else "reviewing"
     loop["blocked_by"] = []
@@ -77,6 +78,7 @@ def mark_review_loop_fix(
     if loop["round"] <= 0:
         loop["round"] = 1
     loop["status"] = "fixing"
+    loop["needs_review"] = True
     loop["last_fix_at"] = now
     loop["last_fix_sha"] = current_sha
     loop["last_fix_summary"] = summary
@@ -98,8 +100,43 @@ def mark_review_loop_fix(
     return loop
 
 
+def mark_review_loop_reviewed(
+    value: Any,
+    max_rounds: int,
+    now: str,
+    *,
+    snapshot_hash: str | None = None,
+) -> dict[str, Any]:
+    loop = normalize_review_loop(value, max_rounds)
+    if loop["status"] == "not_started":
+        return loop
+
+    needs_new_round = loop["status"] == "fixing"
+    if needs_new_round:
+        loop["round"] += 1
+        if loop["round"] > loop["max_rounds"]:
+            loop["round"] = loop["max_rounds"]
+            return stop_review_loop(loop, "blocked_max_rounds", [], "max review rounds exceeded", now)
+        loop["status"] = "re_reviewing" if loop["round"] > 1 else "reviewing"
+        loop["needs_review"] = False
+        loop["blocked_by"] = []
+    elif loop["status"] in {"reviewing", "re_reviewing"}:
+        loop["status"] = "re_reviewing" if loop["round"] > 1 else "reviewing"
+    else:
+        return loop
+
+    loop["needs_review"] = False
+    loop["last_reviewed_at"] = now
+    loop["last_review_snapshot_at"] = now
+    loop["last_review_snapshot_hash"] = snapshot_hash
+    loop["updated_at"] = now
+    _append_round_event(loop, "review", now, round=loop["round"], snapshot_hash=snapshot_hash)
+    return loop
+
+
 def mark_review_loop_clean(value: Any, now: str) -> dict[str, Any]:
     loop = normalize_review_loop(value)
+    loop["needs_review"] = False
     loop["status"] = "clean"
     loop["blocked_by"] = []
     loop["completed_at"] = now

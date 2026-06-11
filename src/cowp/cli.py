@@ -96,6 +96,7 @@ from cowp.review_loop import (
     decision_finding_blockers,
     mark_review_loop_clean,
     mark_review_loop_fix,
+    mark_review_loop_reviewed,
     review_loop_fingerprint,
     stop_review_loop,
     validate_review_loop,
@@ -1161,6 +1162,16 @@ def cmd_review(args: argparse.Namespace) -> int:
         task.id,
         **changes,
     )
+    updated_state = store.load().get(task.id)
+    if updated_state is not None:
+        loop = mark_review_loop_reviewed(
+            updated_state.review_loop,
+            config.review_loop.max_rounds,
+            now_for_cli(),
+            snapshot_hash=snapshot_hash,
+        )
+        if loop != (updated_state.review_loop or {}):
+            store.update(task.id, review_loop=loop)
     store.append_audit_event(
         task.id,
         "review",
@@ -1310,6 +1321,13 @@ def cmd_review_loop_complete(args: argparse.Namespace) -> int:
     current_hash = review_snapshot_hash_for_state(config, task, state, worktree)
     if not state.review_snapshot_hash:
         raise ConfigError(f"{task.id}: review loop complete requires review material; run cowp review first")
+    loop = state.review_loop or {}
+    if loop.get("needs_review"):
+        raise ConfigError(f"{task.id}: review loop complete requires review after latest fix; run cowp review again")
+    last_fix_at = str(loop.get("last_fix_at") or "")
+    last_review_snapshot_at = str(loop.get("last_review_snapshot_at") or "")
+    if last_fix_at and (not last_review_snapshot_at or last_review_snapshot_at <= last_fix_at):
+        raise ConfigError(f"{task.id}: review loop complete requires review after latest fix; run cowp review again")
     if current_hash != state.review_snapshot_hash:
         raise ConfigError(f"{task.id}: review loop complete requires a fresh review snapshot; run cowp review again")
     now = now_for_cli()
