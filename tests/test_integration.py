@@ -147,6 +147,257 @@ def test_plan_exported_manifest_runs_execution_flow(
     )
 
 
+def test_controller_serial_task_runs_and_finishes_in_controller_worktree(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    cfg = default_config_data(git_repo)
+    cfg["execution"] = {"strategy": "controller_serial", "max_parallel": 3}
+    cfg["acceptance"] = {"worker": None, "main": None}
+    write_json(workerpool_config, cfg)
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "controller serial change",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+                "acceptance_command": None,
+            }
+        ],
+    )
+    before = run(["git", "rev-parse", "HEAD"], git_repo).stdout.strip()
+    branch = run(["git", "branch", "--show-current"], git_repo).stdout.strip()
+
+    assert main(["validate", "--repo", str(git_repo), "--manifest", str(manifest)]) == 0
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    config = load_project_config(git_repo)
+    state = StateStore(config.runs_root).load()["TASK-001"]
+    assert state.execution_strategy == "controller_serial"
+    assert state.worktree == str(git_repo)
+    assert state.controller_branch == branch
+    assert state.task_start_sha == before
+    assert not (config.worktree_root / "TASK-001").exists()
+
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    assert "# TASK-001" in (git_repo / "src" / "example.py").read_text(encoding="utf-8")
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    assert (
+        main(
+            [
+                "finish",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--reviewed-all-changed",
+            ]
+        )
+        == 0
+    )
+
+    state = StateStore(config.runs_root).load()["TASK-001"]
+    assert state.status == "merged"
+    assert state.finish_destination == "controller_branch"
+    assert state.task_commit_sha == run(["git", "rev-parse", "HEAD"], git_repo).stdout.strip()
+    assert run(["git", "log", "-1", "--pretty=%s"], git_repo).stdout.strip() == "TASK-001 controller serial change"
+    assert run(["git", "status", "--short"], git_repo).stdout.strip() == ""
+
+
+def test_controller_serial_start_refuses_dirty_worktree(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    cfg = default_config_data(git_repo)
+    cfg["execution"] = {"strategy": "controller_serial", "max_parallel": 1}
+    write_json(workerpool_config, cfg)
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "dirty start",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+                "acceptance_command": None,
+            }
+        ],
+    )
+    (git_repo / "src" / "example.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 1
+
+
+def test_controller_serial_start_refuses_existing_active_task(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    cfg = default_config_data(git_repo)
+    cfg["execution"] = {"strategy": "controller_serial", "max_parallel": 1}
+    write_json(workerpool_config, cfg)
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "already active",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+                "acceptance_command": None,
+            }
+        ],
+    )
+
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 1
+
+
+def test_controller_serial_run_requires_start_gate(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    cfg = default_config_data(git_repo)
+    cfg["execution"] = {"strategy": "controller_serial", "max_parallel": 1}
+    write_json(workerpool_config, cfg)
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "must start first",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+                "acceptance_command": None,
+            }
+        ],
+    )
+
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 1
+    assert "# TASK-001" not in (git_repo / "src" / "example.py").read_text(encoding="utf-8")
+
+
+def test_controller_serial_run_all_refuses_multiple_runnable_tasks(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    cfg = default_config_data(git_repo)
+    cfg["execution"] = {"strategy": "controller_serial", "max_parallel": 2}
+    write_json(workerpool_config, cfg)
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "one",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+                "acceptance_command": None,
+            },
+            {
+                "id": "TASK-002",
+                "title": "two",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-002.md",
+                "allowed_files": ["tests/test_example.py"],
+                "acceptance_command": None,
+            },
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--all"]) == 1
+
+
+def test_controller_serial_review_refuses_commit_before_finish(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    cfg = default_config_data(git_repo)
+    cfg["execution"] = {"strategy": "controller_serial", "max_parallel": 1}
+    write_json(workerpool_config, cfg)
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "unauthorized commit",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+                "acceptance_command": None,
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    (git_repo / "src" / "example.py").write_text("VALUE = 2\n", encoding="utf-8")
+    run(["git", "add", "src/example.py"], git_repo)
+    run(["git", "commit", "-m", "unauthorized task commit"], git_repo)
+
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 1
+
+
+def test_controller_serial_finish_refuses_staged_unreviewed_file(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    (git_repo / "README.md").write_text("# repo\n", encoding="utf-8")
+    run(["git", "add", "README.md"], git_repo)
+    run(["git", "commit", "-m", "add readme"], git_repo)
+    cfg = default_config_data(git_repo)
+    cfg["execution"] = {"strategy": "controller_serial", "max_parallel": 1}
+    write_json(workerpool_config, cfg)
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "staged unreviewed",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py", "README.md"],
+                "acceptance_command": None,
+            }
+        ],
+    )
+    assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+    (git_repo / "README.md").write_text("# unreviewed\n", encoding="utf-8")
+    run(["git", "add", "README.md"], git_repo)
+    assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 0
+
+    assert (
+        main(
+            [
+                "finish",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--task",
+                "TASK-001",
+                "--reviewed-files",
+                "src/example.py",
+            ]
+        )
+        == 1
+    )
+
+
 def test_integration_task_start_run_review_finish(
     git_repo: Path,
     workerpool_config: Path,

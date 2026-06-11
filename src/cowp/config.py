@@ -14,6 +14,12 @@ MERGED_STATE = "merged"
 TASK_KIND_IMPLEMENTATION = "implementation"
 TASK_KIND_INTEGRATION = "integration"
 TASK_KINDS = {TASK_KIND_IMPLEMENTATION, TASK_KIND_INTEGRATION}
+VCS_GIT = "git"
+VCS_SVN_GIT = "svn_git"
+VCS_TYPES = {VCS_GIT, VCS_SVN_GIT}
+EXECUTION_WORKTREE_PARALLEL = "worktree_parallel"
+EXECUTION_CONTROLLER_SERIAL = "controller_serial"
+EXECUTION_STRATEGIES = {EXECUTION_WORKTREE_PARALLEL, EXECUTION_CONTROLLER_SERIAL}
 
 
 class ConfigError(ValueError):
@@ -38,6 +44,24 @@ class SetupConfig:
 
 
 @dataclass(frozen=True)
+class SvnGitConfig:
+    update_before_sync: bool = True
+    publish_policy: str = "manual"
+
+
+@dataclass(frozen=True)
+class VcsConfig:
+    type: str = VCS_GIT
+    svn: SvnGitConfig = field(default_factory=SvnGitConfig)
+
+
+@dataclass(frozen=True)
+class ExecutionConfig:
+    strategy: str = EXECUTION_WORKTREE_PARALLEL
+    max_parallel: int = 2
+
+
+@dataclass(frozen=True)
 class WorkerProfile:
     id: str
     agent: str | None = None
@@ -55,6 +79,8 @@ class ProjectConfig:
     worktree_root: Path
     runs_root: Path
     max_parallel: int
+    vcs: VcsConfig
+    execution: ExecutionConfig
     opencode: OpencodeConfig
     acceptance: AcceptanceConfig
     setup: SetupConfig
@@ -81,6 +107,7 @@ class ManifestTask:
     effective_depends_on: tuple[str, ...] = ()
     dependency_mapping_hash: str | None = None
     dependency_metadata_present: bool = False
+    publish_batch: str | None = None
     active: bool = True
     withdrawn: bool = False
     withdrawn_at: str | None = None
@@ -92,6 +119,7 @@ class ManifestTask:
 class Manifest:
     path: Path
     tasks: tuple[ManifestTask, ...]
+    default_publish_batch: str | None = None
 
     def get_task(self, task_id: str) -> ManifestTask:
         for task in self.tasks:
@@ -121,6 +149,8 @@ def default_config_data(repo: Path, external_pool: bool = False) -> dict[str, An
         "worktree_root": "worktrees" if external_pool else "../{repo_name}.worktrees",
         "runs_root": "runs" if external_pool else "../{repo_name}.runs",
         "max_parallel": 2,
+        "vcs": {"type": VCS_GIT},
+        "execution": {"strategy": EXECUTION_WORKTREE_PARALLEL, "max_parallel": 2},
         "opencode": {"pure": True, "default_agent": "build"},
         "acceptance": {
             "worker": None,
@@ -203,6 +233,12 @@ def parse_project_config(
     opencode_data = data.get("opencode") or {}
     acceptance_data = data.get("acceptance") or {}
     setup_data = data.get("setup") or {}
+    vcs_data = data.get("vcs") or {}
+    svn_data = vcs_data.get("svn") or {}
+    execution_data = data.get("execution") or {}
+    strategy = str(execution_data.get("strategy") or EXECUTION_WORKTREE_PARALLEL)
+    configured_parallel = int(execution_data.get("max_parallel") or data.get("max_parallel") or 1)
+    effective_parallel = 1 if strategy == EXECUTION_CONTROLLER_SERIAL else max(1, configured_parallel)
 
     default_worktree_root = "../{repo_name}.worktrees" if legacy_layout else "worktrees"
     default_runs_root = "../{repo_name}.runs" if legacy_layout else "runs"
@@ -215,7 +251,18 @@ def parse_project_config(
         base_branch=str(data.get("base_branch") or current_branch(repo) or "main"),
         worktree_root=_expand_path(root_base, repo_name, data.get("worktree_root") or default_worktree_root),
         runs_root=_expand_path(root_base, repo_name, data.get("runs_root") or default_runs_root),
-        max_parallel=max(1, int(data.get("max_parallel") or 1)),
+        max_parallel=effective_parallel,
+        vcs=VcsConfig(
+            type=str(vcs_data.get("type") or VCS_GIT),
+            svn=SvnGitConfig(
+                update_before_sync=bool(svn_data.get("update_before_sync", True)),
+                publish_policy=str(svn_data.get("publish_policy") or "manual"),
+            ),
+        ),
+        execution=ExecutionConfig(
+            strategy=strategy,
+            max_parallel=effective_parallel,
+        ),
         opencode=OpencodeConfig(
             pure=bool(opencode_data.get("pure", True)),
             default_agent=str(opencode_data.get("default_agent") or "build"),
@@ -244,6 +291,7 @@ def load_manifest(config_or_repo: ProjectConfig | Path, manifest_path: str | Pat
     tasks_data = data.get("tasks")
     if not isinstance(tasks_data, list):
         raise ConfigError("manifest.tasks must be an array")
+    default_publish_batch = _optional_str(data.get("publish_batch"))
 
     tasks: list[ManifestTask] = []
     for raw in tasks_data:
@@ -295,6 +343,7 @@ def load_manifest(config_or_repo: ProjectConfig | Path, manifest_path: str | Pat
                 effective_depends_on=effective_depends_on,
                 dependency_mapping_hash=_optional_str(raw.get("dependency_mapping_hash")),
                 dependency_metadata_present=dependency_metadata_present,
+                publish_batch=_optional_str(raw.get("publish_batch")),
                 active=bool(raw.get("active", True)),
                 withdrawn=bool(raw.get("withdrawn", False)),
                 withdrawn_at=_optional_str(raw.get("withdrawn_at")),
@@ -306,7 +355,7 @@ def load_manifest(config_or_repo: ProjectConfig | Path, manifest_path: str | Pat
                 ),
             )
         )
-    return Manifest(path=path, tasks=tuple(tasks))
+    return Manifest(path=path, tasks=tuple(tasks), default_publish_batch=default_publish_batch)
 
 
 def validate_project(config: ProjectConfig, manifest: Manifest) -> ValidationResult:
@@ -314,6 +363,17 @@ def validate_project(config: ProjectConfig, manifest: Manifest) -> ValidationRes
 
     if not (config.repo / ".git").exists():
         result.errors.append(f"repo is not a git worktree root: {config.repo}")
+    if config.vcs.type not in VCS_TYPES:
+        result.errors.append(f"invalid vcs.type: {config.vcs.type}")
+    if config.execution.strategy not in EXECUTION_STRATEGIES:
+        result.errors.append(f"invalid execution.strategy: {config.execution.strategy}")
+    if config.vcs.type == VCS_SVN_GIT and config.execution.strategy != EXECUTION_CONTROLLER_SERIAL:
+        result.errors.append("svn_git requires execution.strategy = controller_serial")
+    if config.vcs.type == VCS_SVN_GIT:
+        if not (config.repo / ".svn").exists():
+            result.errors.append(f"svn_git requires an SVN working copy: {config.repo}")
+        if _git_path_tracked(config.repo, ".svn"):
+            result.errors.append(".svn must not be tracked by Git")
     if not config.base_branch:
         result.errors.append("base_branch is required")
     if not config.workers:
@@ -509,6 +569,19 @@ def _git_ref_exists(repo: Path, ref: str) -> bool:
         capture_output=True,
     )
     return proc.returncode == 0
+
+
+def _git_path_tracked(repo: Path, path: str) -> bool:
+    import subprocess
+
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "--", path],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+    )
+    return bool(proc.stdout.strip())
 
 
 def _normalize_allowed_path(path: str) -> str:

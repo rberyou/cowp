@@ -416,6 +416,8 @@ def dashboard_html(refresh_ms: int) -> str:
       const mergeOrder = (task.merge_order || []).join(', ');
       const pairs = [
         ['plan', task.plan_status],
+        ['vcs', task.vcs_type],
+        ['strategy', task.execution_strategy],
         ['kind', task.kind],
         ['executor', task.executor],
         ['depends_on', dependsOn],
@@ -435,6 +437,9 @@ def dashboard_html(refresh_ms: int) -> str:
         ['target_branch', task.target_branch],
         ['integration_result', task.integration_result],
         ['finish_destination', task.finish_destination],
+        ['publish_batch', task.publish_batch],
+        ['svn_base_revision', task.svn_base_revision],
+        ['git_base_commit', task.git_base_commit],
         ['source_branches', sourceBranches],
         ['merge_order', mergeOrder],
         ['branch_ahead', task.branch_ahead_count],

@@ -11,6 +11,7 @@ from pathlib import Path
 from cowp.backlog import backlog_status_lines
 from cowp.config import (
     ConfigError,
+    EXECUTION_CONTROLLER_SERIAL,
     Manifest,
     ProjectConfig,
     config_path,
@@ -31,8 +32,13 @@ from cowp.gitops import (
     FinishError,
     GitError,
     branch_for_task,
+    changed_files_from_base,
     commit_range,
     create_worktree,
+    current_branch,
+    diff_for_paths_from_base,
+    ensure_clean_repo,
+    finish_controller_serial_task,
     finish_task,
     head_sha,
     is_concrete_sha,
@@ -43,6 +49,9 @@ from cowp.gitops import (
     task_review_diff_for_paths,
     task_review_diff_stat,
     task_review_snapshot_hash,
+    task_diff_from_base,
+    task_diff_stat_from_base,
+    task_snapshot_hash_from_base,
     task_status,
     task_worktree,
 )
@@ -77,6 +86,7 @@ from cowp.queries import (
 from cowp.runner import RunnerError, run_tasks
 from cowp.server import ServerError, serve_backlog
 from cowp.state import StateStore, TaskState, now_iso
+from cowp.svngit import ensure_svn_git_start_gate, load_baselines, publish_batch_for_task, run_prepublish_gate
 
 START_SKIP_STATUSES = {"worktree_created", "running", "worker_succeeded", "merged", "superseded", "withdrawn"}
 RUN_SKIP_STATUSES = {"worker_succeeded", "merged", "superseded", "withdrawn"}
@@ -316,6 +326,12 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="show task status")
     add_repo_manifest(status)
     status.set_defaults(func=cmd_status)
+
+    prepublish = sub.add_parser("prepublish", help="verify an SVN+Git batch before manual SVN commit")
+    add_repo_manifest(prepublish)
+    prepublish.add_argument("--batch")
+    prepublish.add_argument("--acceptance-command")
+    prepublish.set_defaults(func=cmd_prepublish)
 
     review = sub.add_parser("review", help="print review material for one task")
     add_repo_manifest(review)
@@ -657,17 +673,37 @@ def cmd_start(args: argparse.Namespace) -> int:
         print("no tasks to start")
         return 0
     tasks = selected_tasks(manifest, task_ids)
+    if config.execution.strategy == EXECUTION_CONTROLLER_SERIAL:
+        if len(tasks) > 1:
+            ids = ", ".join(task.id for task in tasks)
+            raise GitError(f"controller_serial can start only one task at a time: {ids}")
+        active = active_controller_serial_task(states)
+        if active:
+            raise GitError(f"controller_serial task is already active: {active.task_id} status={active.status}")
     for task in tasks:
         blockers = queries.run_blockers(task, known_task_ids=known_task_ids)
         if blockers:
             raise ConfigError(f"{task.id}: task is not startable: {'; '.join(blockers)}")
-        worktree = create_worktree(config, task, skip_clean_check=args.skip_clean_check)
-        base_sha = head_sha(worktree)
+        svn_git_record = None
+        if config.execution.strategy == EXECUTION_CONTROLLER_SERIAL:
+            svn_git_record = ensure_svn_git_start_gate(config, manifest, task)
+            worktree = config.repo
+            ensure_clean_repo(config)
+            branch = current_branch(config.repo)
+            base_sha = head_sha(config.repo)
+            task_branch = branch
+            finish_destination = "controller_branch"
+        else:
+            worktree = create_worktree(config, task, skip_clean_check=args.skip_clean_check)
+            base_sha = head_sha(worktree)
+            task_branch = branch_for_task(task)
+            finish_destination = "target_branch" if is_integration_task(task) else "base_branch"
         store.update(
             task.id,
             status="worktree_created",
-            branch=branch_for_task(task),
+            branch=task_branch,
             worktree=str(worktree),
+            workspace_path=str(worktree),
             worker=None if is_integration_task(task) else task.worker or "default",
             log_path=None,
             exit_code=None,
@@ -686,6 +722,21 @@ def cmd_start(args: argparse.Namespace) -> int:
             review_snapshot_hash=None,
             current_snapshot_hash=None,
             task_branch_base_sha=base_sha,
+            task_start_sha=base_sha,
+            task_commit_sha=None,
+            controller_branch=branch if config.execution.strategy == EXECUTION_CONTROLLER_SERIAL else None,
+            execution_strategy=config.execution.strategy,
+            vcs_type=config.vcs.type,
+            finish_destination=finish_destination,
+            feature_id=task.feature_id,
+            publish_batch=(
+                publish_batch_for_task(manifest, task)
+                if svn_git_record
+                else task.publish_batch or manifest.default_publish_batch
+            ),
+            svn_base_revision=svn_git_record.get("svn_base_revision") if svn_git_record else None,
+            svn_url=svn_git_record.get("svn_url") if svn_git_record else None,
+            git_base_commit=svn_git_record.get("git_base_commit") if svn_git_record else None,
             finish_attempts=[],
             superseded_reason=None,
             superseded_at=None,
@@ -708,7 +759,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
             task.id
             for task in manifest.tasks
             if (state := states.get(task.id))
-            if state.worktree and Path(state.worktree).exists()
+            if task_workspace_for_state(config, task, state).exists()
         ]
     else:
         task_ids = list(args.task)
@@ -725,9 +776,11 @@ def run_task_setup(config: ProjectConfig, store: StateStore, task) -> int:
     command = config.setup.command
     if not command:
         raise ConfigError("setup.command is not configured")
-    worktree = task_worktree(config, task.id)
+    state = store.load().get(task.id)
+    worktree = task_workspace_for_state(config, task, state)
     if not worktree.exists():
-        raise GitError(f"{task.id}: task worktree does not exist: {worktree}")
+        raise GitError(f"{task.id}: task workspace does not exist: {worktree}")
+    ensure_controller_branch(config, task, state)
     store.update(task.id, setup_command=command, setup_exit_code=None)
     if os.name == "nt":
         args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]
@@ -786,28 +839,43 @@ def cmd_status(args: argparse.Namespace) -> int:
     states = StateStore(config.runs_root).load()
     queries = WorkflowQueries(config, manifest=manifest, plans=load_all_plans(config), states=states)
     known_task_ids = {task.id for task in manifest.tasks}
+    if config.vcs.type == "svn_git":
+        for batch_id, record in sorted(load_baselines(config).items()):
+            print(f"publish_batch {batch_id} state={record.get('state')}")
+            print(f"  svn_base_revision: {record.get('svn_base_revision')}")
+            print(f"  git_base_commit: {record.get('git_base_commit')}")
+            print(f"  controller_branch: {record.get('controller_branch')}")
+            if record.get("prepublish_status"):
+                print(f"  prepublish: {record.get('prepublish_status')} report={record.get('prepublish_report_path')}")
     for task in manifest.tasks:
         state = states.get(task.id)
-        worktree = task_worktree(config, task.id)
+        worktree = task_workspace_for_state(config, task, state)
         status = state.status if state else "planned"
         exit_code = "" if not state or state.exit_code is None else f" exit={state.exit_code}"
         print(f"{task.id} {status}{exit_code}")
+        print(f"  vcs: {state.vcs_type if state and state.vcs_type else config.vcs.type}")
+        print(
+            "  execution_strategy: "
+            + (state.execution_strategy if state and state.execution_strategy else config.execution.strategy)
+        )
         print(f"  kind: {task.kind}")
         print(f"  executor: {'codex' if is_integration_task(task) else 'worker'}")
-        print(f"  branch: {branch_for_task(task)}")
+        print(f"  branch: {state.branch if state and state.branch else branch_for_task(task)}")
         if is_integration_task(task):
             print(f"  base_branch: {task_effective_base_branch(config, task)}")
             print(f"  integration_result: {task_target_branch(task)}")
-            print("  finish_destination: target_branch")
+            print("  finish_destination: " + (state.finish_destination if state and state.finish_destination else "target_branch"))
             if task.source_branches:
                 print(f"  source_branches: {', '.join(task.source_branches)}")
             if task.merge_order:
                 print(f"  merge_order: {', '.join(task.merge_order)}")
+        elif state and state.finish_destination:
+            print(f"  finish_destination: {state.finish_destination}")
         print(f"  worktree: {worktree}")
         print(f"  git: {compact(task_status(worktree))}")
         if state and state.setup_command:
             print(f"  setup: exit={state.setup_exit_code} command={state.setup_command}")
-        if is_integration_task(task) and worktree.exists():
+        if is_integration_task(task) and worktree.exists() and config.execution.strategy != EXECUTION_CONTROLLER_SERIAL:
             ahead = task_branch_ahead_commits(config, task, worktree)
             print(f"  branch_ahead: {len(ahead)}")
         if state and state.log_path:
@@ -834,18 +902,31 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prepublish(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    record = run_prepublish_gate(
+        config,
+        manifest,
+        batch_id=args.batch,
+        acceptance_command=args.acceptance_command,
+    )
+    print(f"{record['publish_batch']}: prepublish_ready")
+    print(f"  report: {record.get('prepublish_report_path')}")
+    return 0
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     config, manifest = load_inputs(args)
     task = manifest.get_task(args.task)
     store = StateStore(config.runs_root)
     state = ensure_reviewable_branch(config, store, task)
-    worktree = task_worktree(config, task.id)
+    worktree = task_workspace_for_state(config, task, state)
     status = task_status(worktree)
-    diff_stat = task_review_diff_stat(config, task, worktree)
-    diff = task_review_diff(config, task, worktree)
-    changed_files = sorted(task_changed_files_for_review(config, task, worktree))
-    selected_diff = task_review_diff_for_paths(config, task, worktree, args.file) if args.file else None
-    snapshot_hash = task_review_snapshot_hash(config, task, worktree)
+    diff_stat = review_diff_stat_for_state(config, task, state, worktree)
+    diff = review_diff_for_state(config, task, state, worktree)
+    changed_files = sorted(changed_files_for_state(config, task, state, worktree))
+    selected_diff = review_diff_for_paths_for_state(config, task, state, worktree, args.file) if args.file else None
+    snapshot_hash = review_snapshot_hash_for_state(config, task, state, worktree)
     review_dir = config.runs_root / task.id
     review_dir.mkdir(parents=True, exist_ok=True)
     status_path = review_dir / "review-status.txt"
@@ -880,6 +961,10 @@ def cmd_review(args: argparse.Namespace) -> int:
         output_mode="files" if args.files else "summary" if args.summary else "file" if args.file else "full",
     )
     _safe_print(f"# {task.id} {task.title}")
+    _safe_print(f"\nvcs: {state.vcs_type or config.vcs.type}")
+    _safe_print(f"execution_strategy: {state.execution_strategy or config.execution.strategy}")
+    if state.finish_destination:
+        _safe_print(f"finish_destination: {state.finish_destination}")
     _safe_print(f"\nkind: {task.kind}")
     if is_integration_task(task):
         ahead = task_branch_ahead_commits(config, task, worktree)
@@ -1067,7 +1152,7 @@ def cmd_finish(args: argparse.Namespace) -> int:
     run_dir = config.runs_root / task.id
     run_dir.mkdir(parents=True, exist_ok=True)
     final_diff_path = run_dir / "final-reviewed.diff"
-    worktree = task_worktree(config, task.id)
+    worktree = task_workspace_for_state(config, task, state)
     reusable_task_commit = finish_gate(
         config=config,
         store=store,
@@ -1075,20 +1160,34 @@ def cmd_finish(args: argparse.Namespace) -> int:
         state=state,
         reviewed_files=reviewed_files,
     )
-    final_diff_path.write_text(task_review_diff(config, task, worktree) or "", encoding="utf-8")
+    final_diff_path.write_text(review_diff_for_state(config, task, state, worktree) or "", encoding="utf-8")
     try:
-        finish_result = finish_task(
-            config=config,
-            task=task,
-            reviewed_files=reviewed_files,
-            commit_message=commit_message,
-            merge_message=merge_message,
-            acceptance_command=acceptance,
-            main_acceptance_command=config.acceptance.main,
-            expected_snapshot_hash=state.review_snapshot_hash,
-            reusable_task_commit_sha=reusable_task_commit,
-            keep_worktree=args.keep_worktree,
-        )
+        if is_controller_serial_state(config, state):
+            if not state.task_start_sha or not state.controller_branch:
+                raise GitError(f"{task.id}: controller_serial state is missing task_start_sha/controller_branch")
+            finish_result = finish_controller_serial_task(
+                config=config,
+                task=task,
+                reviewed_files=reviewed_files,
+                commit_message=commit_message,
+                acceptance_command=acceptance,
+                expected_snapshot_hash=state.review_snapshot_hash,
+                task_start_sha=state.task_start_sha,
+                controller_branch=state.controller_branch,
+            )
+        else:
+            finish_result = finish_task(
+                config=config,
+                task=task,
+                reviewed_files=reviewed_files,
+                commit_message=commit_message,
+                merge_message=merge_message,
+                acceptance_command=acceptance,
+                main_acceptance_command=config.acceptance.main,
+                expected_snapshot_hash=state.review_snapshot_hash,
+                reusable_task_commit_sha=reusable_task_commit,
+                keep_worktree=args.keep_worktree,
+            )
     except FinishError as exc:
         latest = store.load().get(args.task) or state
         attempts = list(latest.finish_attempts or [])
@@ -1117,8 +1216,10 @@ def cmd_finish(args: argparse.Namespace) -> int:
         reviewed_files=list(reviewed_files),
         worker_acceptance_command=acceptance,
         worker_acceptance_exit_code=finish_result.worker_acceptance_exit_code,
-        main_acceptance_command=config.acceptance.main,
+        main_acceptance_command=None if is_controller_serial_state(config, state) else config.acceptance.main,
         main_acceptance_exit_code=finish_result.main_acceptance_exit_code,
+        task_commit_sha=finish_result.task_commit_sha,
+        finish_destination=state.finish_destination or ("controller_branch" if is_controller_serial_state(config, state) else None),
         finish_attempts=attempts,
     )
     print(f"{args.task}: merged")
@@ -1193,6 +1294,85 @@ def selected_tasks(manifest: Manifest, task_ids) -> list:
     return [manifest.get_task(task_id) for task_id in task_ids]
 
 
+def is_controller_serial_state(config: ProjectConfig, state: TaskState | None) -> bool:
+    if state and state.execution_strategy:
+        return state.execution_strategy == EXECUTION_CONTROLLER_SERIAL
+    return config.execution.strategy == EXECUTION_CONTROLLER_SERIAL
+
+
+def active_controller_serial_task(states: dict[str, TaskState], exclude: set[str] | None = None) -> TaskState | None:
+    excluded = exclude or set()
+    terminal = {"merged", "superseded", "withdrawn"}
+    for state in states.values():
+        if state.task_id in excluded:
+            continue
+        if state.execution_strategy != EXECUTION_CONTROLLER_SERIAL:
+            continue
+        if state.status not in terminal:
+            return state
+    return None
+
+
+def task_workspace_for_state(config: ProjectConfig, task, state: TaskState | None) -> Path:
+    if is_controller_serial_state(config, state):
+        raw = (state.workspace_path or state.worktree) if state else None
+        return Path(raw).expanduser().resolve() if raw else config.repo
+    return task_worktree(config, task.id)
+
+
+def ensure_controller_branch(config: ProjectConfig, task, state: TaskState | None) -> None:
+    if not is_controller_serial_state(config, state):
+        return
+    if not state or not state.controller_branch:
+        raise GitError(f"{task.id}: controller_serial state is missing controller_branch")
+    branch = current_branch(config.repo)
+    if branch != state.controller_branch:
+        raise GitError(f"{task.id}: controller branch changed; expected {state.controller_branch}, got {branch}")
+
+
+def controller_review_base(state: TaskState) -> str:
+    base = state.task_start_sha or state.task_branch_base_sha
+    if not base:
+        raise GitError(f"{state.task_id}: controller_serial state is missing task_start_sha")
+    return base
+
+
+def review_diff_stat_for_state(config: ProjectConfig, task, state: TaskState, worktree: Path) -> str:
+    if is_controller_serial_state(config, state):
+        return task_diff_stat_from_base(worktree, controller_review_base(state))
+    return task_review_diff_stat(config, task, worktree)
+
+
+def review_diff_for_state(config: ProjectConfig, task, state: TaskState, worktree: Path) -> str:
+    if is_controller_serial_state(config, state):
+        return task_diff_from_base(worktree, controller_review_base(state))
+    return task_review_diff(config, task, worktree)
+
+
+def review_diff_for_paths_for_state(
+    config: ProjectConfig,
+    task,
+    state: TaskState,
+    worktree: Path,
+    paths: list[str],
+) -> str:
+    if is_controller_serial_state(config, state):
+        return diff_for_paths_from_base(worktree, controller_review_base(state), paths)
+    return task_review_diff_for_paths(config, task, worktree, paths)
+
+
+def review_snapshot_hash_for_state(config: ProjectConfig, task, state: TaskState, worktree: Path) -> str:
+    if is_controller_serial_state(config, state):
+        return task_snapshot_hash_from_base(worktree, controller_review_base(state))
+    return task_review_snapshot_hash(config, task, worktree)
+
+
+def changed_files_for_state(config: ProjectConfig, task, state: TaskState, worktree: Path) -> set[str]:
+    if is_controller_serial_state(config, state):
+        return changed_files_from_base(worktree, controller_review_base(state))
+    return task_changed_files_for_review(config, task, worktree)
+
+
 def resolve_reviewed_files(config: ProjectConfig, task, state: TaskState, args: argparse.Namespace) -> list[str]:
     reviewed: list[str] = []
     reviewed.extend(args.reviewed_files or [])
@@ -1207,13 +1387,13 @@ def resolve_reviewed_files(config: ProjectConfig, task, state: TaskState, args: 
         reviewed.extend(line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#"))
 
     if args.reviewed_all_changed:
-        worktree = task_worktree(config, task.id)
-        current_hash = task_review_snapshot_hash(config, task, worktree)
+        worktree = task_workspace_for_state(config, task, state)
+        current_hash = review_snapshot_hash_for_state(config, task, state, worktree)
         if not state.review_snapshot_hash:
             raise GitError(f"{task.id}: --reviewed-all-changed requires review material; run cowp review first")
         if current_hash != state.review_snapshot_hash:
             raise GitError(f"{task.id}: --reviewed-all-changed requires a fresh review snapshot; run cowp review again")
-        reviewed.extend(sorted(task_changed_files_for_review(config, task, worktree)))
+        reviewed.extend(sorted(changed_files_for_state(config, task, state, worktree)))
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -1254,8 +1434,28 @@ def ensure_review_mutation_allowed(store: StateStore, task, command: str) -> Tas
 def ensure_reviewable_branch(config: ProjectConfig, store: StateStore, task) -> TaskState:
     task_id = task.id
     state = get_or_create_task_state(store, task_id)
-    worktree = task_worktree(config, task_id)
+    worktree = task_workspace_for_state(config, task, state)
+    ensure_controller_branch(config, task, state)
     current_head = head_sha(worktree)
+    if is_controller_serial_state(config, state):
+        if not state.task_start_sha:
+            state = store.update(task_id, task_start_sha=current_head, task_branch_base_sha=current_head)
+            store.append_audit_event(
+                task_id,
+                "review",
+                "initialized missing controller_serial task_start_sha",
+                task_start_sha=current_head,
+            )
+        if current_head != state.task_start_sha:
+            store.append_audit_event(
+                task_id,
+                "review",
+                "refused controller branch commit before finish",
+                controller_head=current_head,
+                task_start_sha=state.task_start_sha,
+            )
+            raise GitError(f"{task_id}: controller branch contains commits before finish")
+        return state
     if is_integration_task(task):
         if not state.task_branch_base_sha:
             base_sha = merge_base_sha(config, task_effective_base_branch(config, task), current_head)
@@ -1343,13 +1543,14 @@ def finish_gate(
             raise GitError(f"{task.id}: reviewed files outside allowed_files: {', '.join(outside_review)}")
     elif not is_integration_task(task):
         raise GitError(f"{task.id}: allowed_files is empty")
-    directory_review = [path for path in reviewed_files if reviewed_path_is_directory(config, task.id, path)]
+    directory_review = [path for path in reviewed_files if reviewed_path_is_directory(config, task, state, path)]
     if directory_review:
         store.append_audit_event(task.id, "finish", "refused directory reviewed path", files=directory_review)
         raise GitError(f"{task.id}: reviewed files must be file paths, not directories: {', '.join(directory_review)}")
 
     if is_integration_task(task):
-        changed_files = task_changed_files_for_review(config, task, task_worktree(config, task.id))
+        worktree = task_workspace_for_state(config, task, state)
+        changed_files = changed_files_for_state(config, task, state, worktree)
         reviewed = {normalize_review_path(path) for path in reviewed_files}
         unreviewed = sorted(path for path in changed_files if normalize_review_path(path) not in reviewed)
         if unreviewed:
@@ -1357,11 +1558,16 @@ def finish_gate(
             raise GitError(f"{task.id}: integration diff contains unreviewed files: {', '.join(unreviewed)}")
 
     state = ensure_finish_branch_gate(config, store, task)
-    reusable = None if is_integration_task(task) else reusable_finish_task_commit(config, task.id, state)
+    reusable = (
+        None
+        if is_integration_task(task) or is_controller_serial_state(config, state)
+        else reusable_finish_task_commit(config, task.id, state)
+    )
     if reusable:
         return reusable
 
-    current_hash = task_review_snapshot_hash(config, task, task_worktree(config, task.id))
+    worktree = task_workspace_for_state(config, task, state)
+    current_hash = review_snapshot_hash_for_state(config, task, state, worktree)
     if current_hash != state.review_snapshot_hash:
         store.update(task.id, current_snapshot_hash=current_hash)
         store.append_audit_event(
@@ -1378,9 +1584,21 @@ def finish_gate(
 def ensure_finish_branch_gate(config: ProjectConfig, store: StateStore, task) -> TaskState:
     task_id = task.id
     state = get_or_create_task_state(store, task_id)
+    ensure_controller_branch(config, task, state)
     if not state.task_branch_base_sha:
         store.append_audit_event(task_id, "finish", "refused finish without task_branch_base_sha")
         raise GitError(f"{task_id}: task_branch_base_sha is missing; run cowp review first")
+    if is_controller_serial_state(config, state):
+        if head_sha(config.repo) != state.task_branch_base_sha:
+            store.append_audit_event(
+                task_id,
+                "finish",
+                "refused controller branch commit before finish",
+                controller_head=head_sha(config.repo),
+                task_branch_base_sha=state.task_branch_base_sha,
+            )
+            raise GitError(f"{task_id}: controller branch contains commits before finish")
+        return state
     if is_integration_task(task):
         return state
     current_head = head_sha(task_worktree(config, task_id))
@@ -1446,9 +1664,9 @@ def normalize_review_path(path: str) -> str:
     return "/".join(parts).lower()
 
 
-def reviewed_path_is_directory(config: ProjectConfig, task_id: str, path: str) -> bool:
+def reviewed_path_is_directory(config: ProjectConfig, task, state: TaskState, path: str) -> bool:
     normalized = normalize_review_path(path)
-    return bool(normalized and (task_worktree(config, task_id) / normalized).is_dir())
+    return bool(normalized and (task_workspace_for_state(config, task, state) / normalized).is_dir())
 
 
 def is_disallowed_wontfix(finding: dict) -> bool:

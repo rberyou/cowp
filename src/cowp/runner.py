@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 from cowp.config import (
+    EXECUTION_CONTROLLER_SERIAL,
     Manifest,
     ManifestTask,
     ProjectConfig,
@@ -16,7 +17,7 @@ from cowp.config import (
     worker_for_task,
     worker_protocol_path,
 )
-from cowp.gitops import task_worktree
+from cowp.gitops import current_branch, task_worktree
 from cowp.queries import WorkflowQueries
 from cowp.state import StateStore
 
@@ -34,6 +35,9 @@ def run_tasks(
     max_parallel: int | None = None,
     plans: tuple[object, ...] = (),
 ) -> dict[str, int]:
+    if config.execution.strategy == EXECUTION_CONTROLLER_SERIAL:
+        return run_controller_serial_tasks(config, manifest, selected_task_ids, plans=plans)
+
     max_workers = max_parallel or config.max_parallel
     states = StateStore(config.runs_root)
     task_map = {task.id: task for task in manifest.tasks if task.id in selected_task_ids}
@@ -115,12 +119,40 @@ def run_tasks(
     return results
 
 
-def skip_integration_task(config: ProjectConfig, task: ManifestTask) -> int:
-    worktree = task_worktree(config, task.id)
-    if not worktree.exists():
-        raise RunnerError(f"{task.id}: worktree does not exist: {worktree}")
+def run_controller_serial_tasks(
+    config: ProjectConfig,
+    manifest: Manifest,
+    selected_task_ids: set[str],
+    plans: tuple[object, ...] = (),
+) -> dict[str, int]:
     states = StateStore(config.runs_root)
-    state = states.load().get(task.id)
+    task_map = {task.id: task for task in manifest.tasks if task.id in selected_task_ids}
+    state_snapshot = states.load()
+    queries = WorkflowQueries(config, manifest=manifest, plans=plans, states=state_snapshot)
+    known_task_ids = {task.id for task in manifest.tasks}
+    runnable = [
+        task
+        for task in task_map.values()
+        if not queries.run_blockers(task, known_task_ids=known_task_ids)
+    ]
+    if not runnable:
+        blocked = ", ".join(_blocked_task_summary(queries, task, known_task_ids) for task in task_map.values())
+        raise RunnerError(f"no runnable tasks; blocked tasks: {blocked}")
+    if len(runnable) > 1:
+        task_ids = ", ".join(task.id for task in runnable)
+        raise RunnerError(f"controller_serial can run only one task at a time; runnable tasks: {task_ids}")
+    task = runnable[0]
+    if is_integration_task(task):
+        return {task.id: skip_integration_task(config, task)}
+    return {task.id: run_one_task(config, task)}
+
+
+def skip_integration_task(config: ProjectConfig, task: ManifestTask) -> int:
+    state = ensure_controller_serial_run_state(config, task)
+    worktree = task_workspace(config, task)
+    if not worktree.exists():
+        raise RunnerError(f"{task.id}: workspace does not exist: {worktree}")
+    states = StateStore(config.runs_root)
     if state is None:
         states.update(task.id, status="planned", exit_code=0, error=None)
     else:
@@ -135,9 +167,14 @@ def skip_integration_task(config: ProjectConfig, task: ManifestTask) -> int:
 
 def run_one_task(config: ProjectConfig, task: ManifestTask) -> int:
     worker = worker_for_task(config, task)
-    worktree = task_worktree(config, task.id)
+    state = ensure_controller_serial_run_state(config, task)
+    worktree = task_workspace(config, task)
     if not worktree.exists():
-        raise RunnerError(f"{task.id}: worktree does not exist: {worktree}")
+        raise RunnerError(f"{task.id}: workspace does not exist: {worktree}")
+    if config.execution.strategy == EXECUTION_CONTROLLER_SERIAL:
+        expected_branch = state.controller_branch
+        if current_branch(worktree) != expected_branch:
+            raise RunnerError(f"{task.id}: controller branch changed; expected {expected_branch}")
 
     run_dir = config.runs_root / task.id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -146,8 +183,9 @@ def run_one_task(config: ProjectConfig, task: ManifestTask) -> int:
     states.update(
         task.id,
         status="running",
-        branch=f"agent/{task.id}",
+        branch=state.controller_branch if config.execution.strategy == EXECUTION_CONTROLLER_SERIAL and state else f"agent/{task.id}",
         worktree=str(worktree),
+        workspace_path=str(worktree),
         worker=worker.id,
         log_path=str(log_path),
         exit_code=None,
@@ -228,7 +266,16 @@ def effective_prompt(config: ProjectConfig, task: ManifestTask, raw_prompt: str)
     allowed = "\n".join(f"- `{path}`" for path in task.allowed_files) or "- <none>"
     acceptance = task.acceptance_command or config.acceptance.worker or "<repository default or none>"
 
+    workspace_note = (
+        "You are editing the controller working tree directly. "
+        "Only this one controller-serial task is allowed to run now."
+        if config.execution.strategy == EXECUTION_CONTROLLER_SERIAL
+        else "You are editing an isolated task worktree."
+    )
+
     guard = f"""Implement `{task.id}` in this repository worktree.
+
+{workspace_note}
 
 Follow every boundary below. This is an execution task, not a request to write
 or improve these instructions.
@@ -305,3 +352,21 @@ def _changed_files(worktree: Path) -> set[str]:
         check=True,
     ).stdout.splitlines()
     return {path.replace("\\", "/") for path in tracked + untracked if path.strip()}
+
+
+def task_workspace(config: ProjectConfig, task: ManifestTask) -> Path:
+    if config.execution.strategy == EXECUTION_CONTROLLER_SERIAL:
+        state = StateStore(config.runs_root).load().get(task.id)
+        if state and (state.workspace_path or state.worktree):
+            return Path(state.workspace_path or state.worktree).expanduser().resolve()
+        return config.repo
+    return task_worktree(config, task.id)
+
+
+def ensure_controller_serial_run_state(config: ProjectConfig, task: ManifestTask):
+    state = StateStore(config.runs_root).load().get(task.id)
+    if config.execution.strategy != EXECUTION_CONTROLLER_SERIAL:
+        return state
+    if not state or not state.controller_branch or not state.task_start_sha:
+        raise RunnerError(f"{task.id}: controller_serial run requires cowp start first")
+    return state

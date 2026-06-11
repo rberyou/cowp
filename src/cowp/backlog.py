@@ -32,6 +32,8 @@ class BacklogTask:
     feature_id: str | None
     kind: str
     executor: str
+    vcs_type: str | None
+    execution_strategy: str | None
     column: str | None
     plan_status: str | None
     depends_on: tuple[str, ...]
@@ -52,6 +54,9 @@ class BacklogTask:
     target_branch: str | None
     integration_result: str | None
     finish_destination: str | None
+    publish_batch: str | None
+    svn_base_revision: str | None
+    git_base_commit: str | None
     source_branches: tuple[str, ...]
     merge_order: tuple[str, ...]
     branch_ahead_count: int | None
@@ -260,6 +265,8 @@ def _task_snapshot(
         feature_id=plan.feature_id,
         kind=task.kind,
         executor="codex" if task.kind == "integration" else "worker",
+        vcs_type=state.vcs_type if state and state.vcs_type else config.vcs.type,
+        execution_strategy=state.execution_strategy if state and state.execution_strategy else config.execution.strategy,
         column=column,
         plan_status=task.status,
         depends_on=metadata.effective,
@@ -279,7 +286,14 @@ def _task_snapshot(
         base_branch=(task.base_branch or config.base_branch) if task.kind == "integration" else None,
         target_branch=(task.target_branch or f"integration/{task.id}") if task.kind == "integration" else None,
         integration_result=(task.target_branch or f"integration/{task.id}") if task.kind == "integration" else None,
-        finish_destination="target_branch" if task.kind == "integration" else "base_branch",
+        finish_destination=(
+            state.finish_destination
+            if state and state.finish_destination
+            else "target_branch" if task.kind == "integration" else "base_branch"
+        ),
+        publish_batch=state.publish_batch if state else None,
+        svn_base_revision=state.svn_base_revision if state else None,
+        git_base_commit=state.git_base_commit if state else None,
         source_branches=task.source_branches,
         merge_order=task.merge_order,
         branch_ahead_count=branch_ahead_count,
@@ -380,6 +394,8 @@ def _unassigned_manifest_tasks(
                 feature_id=_optional_str(raw.get("feature_id")),
                 kind=kind,
                 executor="codex" if kind == "integration" else "worker",
+                vcs_type=state.vcs_type if state and state.vcs_type else config.vcs.type,
+                execution_strategy=state.execution_strategy if state and state.execution_strategy else config.execution.strategy,
                 column=column,
                 plan_status=None,
                 depends_on=tuple(str(dep).strip() for dep in raw.get("depends_on") or [] if str(dep).strip()),
@@ -407,7 +423,14 @@ def _unassigned_manifest_tasks(
                 base_branch=base_branch if kind == "integration" else None,
                 target_branch=target_branch if kind == "integration" else None,
                 integration_result=target_branch if kind == "integration" else None,
-                finish_destination="target_branch" if kind == "integration" else "base_branch",
+                finish_destination=(
+                    state.finish_destination
+                    if state and state.finish_destination
+                    else "target_branch" if kind == "integration" else "base_branch"
+                ),
+                publish_batch=state.publish_batch if state else _optional_str(raw.get("publish_batch")),
+                svn_base_revision=state.svn_base_revision if state else None,
+                git_base_commit=state.git_base_commit if state else None,
                 source_branches=source_branches,
                 merge_order=merge_order,
                 branch_ahead_count=branch_ahead_count,
@@ -459,6 +482,8 @@ def _feature_lines(feature: BacklogFeature) -> list[str]:
             lines.append("      withdrawn_replacements: " + ", ".join(task.withdrawn_replacement_tasks))
         if task.kind:
             lines.append(f"      kind: {task.kind} executor={task.executor}")
+        if task.execution_strategy:
+            lines.append(f"      vcs: {task.vcs_type} execution_strategy={task.execution_strategy}")
         if task.base_branch:
             lines.append(f"      base_branch: {task.base_branch}")
         if task.target_branch:
@@ -467,6 +492,12 @@ def _feature_lines(feature: BacklogFeature) -> list[str]:
             lines.append(f"      integration_result: {task.integration_result}")
         if task.finish_destination:
             lines.append(f"      finish_destination: {task.finish_destination}")
+        if task.publish_batch:
+            lines.append(f"      publish_batch: {task.publish_batch}")
+        if task.svn_base_revision:
+            lines.append(f"      svn_base_revision: {task.svn_base_revision}")
+        if task.git_base_commit:
+            lines.append(f"      git_base_commit: {task.git_base_commit}")
         if task.setup_command:
             lines.append(f"      setup: exit={task.setup_exit_code} command={task.setup_command}")
         if task.source_branches:
@@ -599,6 +630,8 @@ def _task_to_dict(task: BacklogTask) -> dict[str, Any]:
         "feature_id": task.feature_id,
         "kind": task.kind,
         "executor": task.executor,
+        "vcs_type": task.vcs_type,
+        "execution_strategy": task.execution_strategy,
         "column": task.column,
         "plan_status": task.plan_status,
         "depends_on": list(task.depends_on),
@@ -619,6 +652,9 @@ def _task_to_dict(task: BacklogTask) -> dict[str, Any]:
         "target_branch": task.target_branch,
         "integration_result": task.integration_result,
         "finish_destination": task.finish_destination,
+        "publish_batch": task.publish_batch,
+        "svn_base_revision": task.svn_base_revision,
+        "git_base_commit": task.git_base_commit,
         "source_branches": list(task.source_branches),
         "merge_order": list(task.merge_order),
         "branch_ahead_count": task.branch_ahead_count,

@@ -186,6 +186,42 @@ In legacy mode, review and either commit the workerpool metadata or keep
 mode, control files stay outside the project repository. `cowp start` expects a
 clean controller worktree unless `--skip-clean-check` is used deliberately.
 
+Choose the execution strategy in `config.json`:
+
+```json
+{
+  "vcs": {"type": "git"},
+  "execution": {"strategy": "worktree_parallel", "max_parallel": 2}
+}
+```
+
+Use `controller_serial` only when workers should edit the controller working
+tree directly:
+
+```json
+{
+  "vcs": {"type": "git"},
+  "execution": {"strategy": "controller_serial", "max_parallel": 1}
+}
+```
+
+For SVN working copies that use local Git commits as the staging layer:
+
+```json
+{
+  "vcs": {
+    "type": "svn_git",
+    "svn": {
+      "update_before_sync": true,
+      "publish_policy": "manual"
+    }
+  },
+  "execution": {"strategy": "controller_serial", "max_parallel": 1}
+}
+```
+
+`svn_git` requires `controller_serial`. `cowp` never performs `svn commit`.
+
 ## 4. Validate
 
 ```powershell
@@ -197,7 +233,7 @@ the same time by default. Tasks already marked `merged` in execution state are
 ignored for overlap warnings so historical manifest entries do not pollute the
 next batch.
 
-## 5. Start Worktrees
+## 5. Start Task Workspaces
 
 ```powershell
 cowp start --repo . --pool-dir ..\Project.workerpool --manifest tasks.json
@@ -210,7 +246,20 @@ TASK-NNN` only when you intend to start that specific task and want any blocker
 or collision to be reported; explicit task selection still refuses non-runnable
 execution states.
 
-Prepare each worktree with the repository-specific environment setup. `cowp`
+In the default `worktree_parallel` strategy, `cowp start` creates a task branch
+and task worktree.
+
+In `controller_serial`, `cowp start` does not create a branch or worktree. It
+records the current controller branch, current Git HEAD, and controller
+workspace path. Only one controller-serial task may be active at a time.
+
+For `svn_git + controller_serial`, the first task in a publish batch runs the
+SVN/Git sync gate. The gate requires clean Git status, clean SVN status, and a
+matching SVN/Git baseline. Later tasks in the same active publish batch allow
+SVN local modifications from previous task commits, but still require clean Git
+status and no SVN conflict-like states.
+
+Prepare each workspace with the repository-specific environment setup. `cowp`
 does not create virtual environments, install packages, run CMake, or generate
 language-specific build artifacts unless the project explicitly configures a
 setup command.
@@ -237,7 +286,7 @@ Or run setup immediately for newly created worktrees:
 cowp start --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --setup
 ```
 
-For integration tasks, `cowp start` creates a Codex-owned branch using
+For integration tasks in `worktree_parallel`, `cowp start` creates a Codex-owned branch using
 `target_branch` or `integration/TASK-NNN`. It starts from the task `base_branch`
 when present, otherwise from the repository `base_branch`.
 
@@ -253,9 +302,13 @@ clear; a downstream task does not run while its upstream dependency is only
 `worker_succeeded`. Historical successful, superseded, or withdrawn tasks can
 remain in `tasks.json` without being rerun.
 
+In `controller_serial`, `cowp run --all` refuses to run more than one runnable
+task. Start and run the next task only after the current task has been reviewed
+and finished.
+
 For integration tasks, `cowp run` does not call OpenCode. It records an audit
 event and leaves the task for Codex to complete manually in the task worktree.
-Run `cowp start` first; `cowp run` fails if the task worktree is missing.
+Run `cowp start` first; `cowp run` fails if the task workspace is missing.
 
 OpenCode runs in pure mode by default. Logs are written under the configured
 `runs_root`. `cowp run` also writes `runs_root/TASK-NNN/effective-prompt.md`,
@@ -291,9 +344,13 @@ cowp review --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --ta
 cowp review --repo . --pool-dir ..\Project.workerpool --manifest tasks.json --task TASK-901 --file src/example.py
 ```
 
-For integration tasks, `review` compares the branch and worktree against the
+For integration tasks in `worktree_parallel`, `review` compares the branch and worktree against the
 effective base branch (`task.base_branch` or repository `base_branch`) and also
 prints branch-ahead commits. Worker JSONL logs are not expected.
+
+In `controller_serial`, `review` compares the controller working tree against
+the `task_start_sha` recorded by `cowp start`. If the controller branch changed
+or a commit appears before `finish`, review is refused.
 
 If Codex finds issues, record them in state:
 
@@ -400,7 +457,53 @@ for dependency tracking, and does not merge the integration branch back into the
 repository `base_branch`. Finish attempts are recorded in state so a failed gate
 can be retried deterministically.
 
-## 8. Refresh Local Workflow Files
+In `controller_serial`, `finish` runs task acceptance in the controller
+repository, refuses stale review snapshots, stages only reviewed files, creates
+a local task commit on the controller branch, records
+`finish_destination=controller_branch`, and does not merge.
+
+## 8. SVN+Git Prepublish Gate
+
+For `svn_git + controller_serial`, one `publish_batch` is the future manual SVN
+commit boundary. Tasks may come from multiple features as long as they share the
+same publish batch.
+
+After all tasks in a batch are finished locally, run:
+
+```powershell
+cowp prepublish `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --batch BATCH-001 `
+  --acceptance-command ".\build-and-test.ps1"
+```
+
+The gate checks:
+
+- all selected batch tasks are locally committed;
+- no open execution review findings block the batch;
+- `git_base_commit..HEAD` contains only selected task commits;
+- SVN has no conflict, missing, obstructed, switched, unversioned, or
+  out-of-date paths;
+- Git changed files match SVN changed files;
+- final acceptance passes without mutating Git or SVN status.
+
+Artifacts are written under `runs_root/prepublish/BATCH-001/`:
+
+- `report.md`
+- `report.json`
+- `final.diff`
+
+If the gate succeeds, the report says the batch is ready for a manual SVN
+commit and shows a suggested `svn commit -m ...` command. Run that command
+yourself after review. `cowp` does not publish to SVN.
+
+After the manual SVN commit leaves SVN status clean and Git status clean, the
+next `cowp start` for a new publish batch closes the previous ready baseline as
+`manually_published_or_cleaned` and records a new baseline.
+
+## 9. Refresh Local Workflow Files
 
 If this repository keeps WorkerPool files ignored locally, check drift after
 upgrading WorkerPool:

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from cowp.config import (
+    EXECUTION_CONTROLLER_SERIAL,
     ConfigError,
     ProjectConfig,
     TASK_ID_RE,
@@ -69,6 +70,7 @@ class PlanTask:
     source_branches: tuple[str, ...]
     merge_order: tuple[str, ...]
     instructions: str | None
+    publish_batch: str | None
     prompt: str | None
     prompt_file: Path | None
     prompt_file_raw: str | None
@@ -304,14 +306,15 @@ def validate_plan(config: ProjectConfig, plan: FeaturePlan) -> ValidationResult:
                     result.warnings.append(f"{task.id}: dependency '{dep}' has no explicit contract")
 
         if task.status == "ready":
-            branch = _task_branch_for_plan_task(task)
-            if branch_exists(config, branch):
-                result.errors.append(
-                    f"{task.id}: task branch already exists: {branch}; choose a new task id or remove the old branch"
-                )
-            worktree = task_worktree(config, task.id)
-            if worktree.exists():
-                result.errors.append(f"{task.id}: task worktree already exists: {worktree}")
+            if config.execution.strategy != EXECUTION_CONTROLLER_SERIAL:
+                branch = _task_branch_for_plan_task(task)
+                if branch_exists(config, branch):
+                    result.errors.append(
+                        f"{task.id}: task branch already exists: {branch}; choose a new task id or remove the old branch"
+                    )
+                worktree = task_worktree(config, task.id)
+                if worktree.exists():
+                    result.errors.append(f"{task.id}: task worktree already exists: {worktree}")
 
     ready_tasks = [
         task
@@ -659,6 +662,8 @@ def next_runnable_tasks(
     selected_worker_count = 0
     for plan in plans:
         for task in plan.tasks:
+            if config.execution.strategy == EXECUTION_CONTROLLER_SERIAL and selected:
+                return selected
             if _plan_task_blockers(config, plan, task, ignore_dependency_state, dependency_scope):
                 continue
             if any(
@@ -819,6 +824,7 @@ def _parse_task(pool_root: Path, raw: Any) -> PlanTask:
         source_branches=source_branches,
         merge_order=merge_order,
         instructions=_optional_str(raw.get("instructions")),
+        publish_batch=_optional_str(raw.get("publish_batch")),
         prompt=_optional_str(raw.get("prompt")),
         prompt_file=prompt_file,
         prompt_file_raw=prompt_file_raw,
@@ -913,6 +919,8 @@ def _manifest_item(plan: FeaturePlan, task: PlanTask, all_plans: tuple[FeaturePl
             item["merge_order"] = list(task.merge_order)
         if task.instructions:
             item["instructions"] = task.instructions
+    if task.publish_batch:
+        item["publish_batch"] = task.publish_batch
     item.update(dependency_metadata_dict(task, all_plans))
     return item
 

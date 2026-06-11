@@ -145,6 +145,13 @@ def head_sha(worktree: Path) -> str:
     return run_text(["git", "-C", str(worktree), "rev-parse", "HEAD"]).strip()
 
 
+def current_branch(worktree: Path) -> str:
+    branch = run_text(["git", "-C", str(worktree), "branch", "--show-current"]).strip()
+    if not branch:
+        raise GitError(f"could not determine current Git branch for {worktree}")
+    return branch
+
+
 def branch_head_sha(config: ProjectConfig, branch: str) -> str:
     return run_text(["git", "-C", str(config.repo), "rev-parse", branch]).strip()
 
@@ -236,6 +243,21 @@ def task_review_diff_for_paths(
     return "\n\n".join(parts) + ("\n" if parts else "")
 
 
+def diff_for_paths_from_base(worktree: Path, base_sha: str, paths: list[str]) -> str:
+    normalized_paths = [path.replace("\\", "/").strip("/") for path in paths if path.strip()]
+    if not normalized_paths:
+        return task_diff_from_base(worktree, base_sha)
+    tracked = run_text(["git", "-C", str(worktree), "diff", base_sha, "--", *normalized_paths])
+    untracked = set(_untracked_files(worktree))
+    untracked_parts = [
+        _untracked_file_diff(worktree, rel_path)
+        for rel_path in normalized_paths
+        if rel_path in untracked
+    ]
+    parts = [part.rstrip() for part in [tracked, *untracked_parts] if part.strip()]
+    return "\n\n".join(parts) + ("\n" if parts else "")
+
+
 def task_review_snapshot_hash(config: ProjectConfig, task: ManifestTask, worktree: Path) -> str:
     if is_integration_task(task):
         return task_snapshot_hash_from_base(worktree, task_review_base_sha(config, task, worktree))
@@ -294,6 +316,18 @@ def changed_files_from_base(worktree: Path, base_sha: str) -> set[str]:
     tracked = run_text(["git", "-C", str(worktree), "diff", "--name-only", base_sha]).splitlines()
     untracked = _untracked_files(worktree)
     return {path.replace("\\", "/") for path in tracked + untracked if path.strip()}
+
+
+def name_status_from_base(worktree: Path, base_sha: str) -> dict[str, str]:
+    output = run_text(["git", "-C", str(worktree), "diff", "--name-status", base_sha])
+    result: dict[str, str] = {}
+    for line in output.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            status = parts[0]
+            path = parts[-1].replace("\\", "/")
+            result[path] = status[0]
+    return result
 
 
 def run_acceptance(command: str, cwd: Path) -> int:
@@ -528,6 +562,63 @@ def finish_task(
     )
 
 
+def finish_controller_serial_task(
+    config: ProjectConfig,
+    task: ManifestTask,
+    reviewed_files: list[str],
+    commit_message: str,
+    acceptance_command: str | None,
+    expected_snapshot_hash: str | None,
+    task_start_sha: str,
+    controller_branch: str,
+) -> FinishResult:
+    if current_branch(config.repo) != controller_branch:
+        raise GitError(f"{task.id}: controller branch changed; expected {controller_branch}")
+    if head_sha(config.repo) != task_start_sha:
+        raise GitError(f"{task.id}: controller branch contains commits before finish")
+    worker_acceptance_exit_code = None
+    if acceptance_command:
+        worker_acceptance_exit_code = run_acceptance(acceptance_command, config.repo)
+    if expected_snapshot_hash and task_snapshot_hash_from_base(config.repo, task_start_sha) != expected_snapshot_hash:
+        raise GitError("review snapshot is stale; run cowp review again")
+
+    git_task(config.repo, "add", "--", *reviewed_files)
+    reviewed = {_normalize_rel_path(path) for path in reviewed_files}
+    staged = [
+        _normalize_rel_path(path)
+        for path in run_text(["git", "-C", str(config.repo), "diff", "--cached", "--name-only"]).splitlines()
+        if path.strip()
+    ]
+    staged_unreviewed = sorted(path for path in staged if path not in reviewed)
+    if staged_unreviewed:
+        raise GitError(f"staged changes include unreviewed files: {', '.join(staged_unreviewed)}")
+    remaining_tracked = run_text(["git", "-C", str(config.repo), "diff", "--name-only"]).splitlines()
+    remaining_untracked = run_text(
+        ["git", "-C", str(config.repo), "ls-files", "--others", "--exclude-standard"]
+    ).splitlines()
+    remaining = [item for item in remaining_tracked + remaining_untracked if item]
+    if remaining:
+        raise GitError(f"unreviewed changes remain: {', '.join(remaining)}")
+
+    quiet = subprocess.run(["git", "-C", str(config.repo), "diff", "--cached", "--quiet"], text=True)
+    if quiet.returncode == 0:
+        raise GitError("no staged changes to commit")
+
+    git_task(config.repo, "commit", "-m", commit_message)
+    task_commit_sha = head_sha(config.repo)
+    return FinishResult(
+        worker_acceptance_exit_code=worker_acceptance_exit_code,
+        main_acceptance_exit_code=None,
+        base_commit_sha=task_start_sha,
+        parent_task_commit_sha=task_start_sha,
+        task_commit_sha=task_commit_sha,
+        covered_commit_range=commit_range(config, task_start_sha, task_commit_sha),
+        review_snapshot_hash=expected_snapshot_hash,
+        merge_commit_sha=None,
+        reused_task_commit=False,
+    )
+
+
 def _abort_merge(config: ProjectConfig) -> str | None:
     proc = subprocess.run(
         ["git", "-C", str(config.repo), "merge", "--abort"],
@@ -676,3 +767,7 @@ def _read_text_lossy(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return path.read_bytes().decode("utf-8", errors="replace")
+
+
+def _normalize_rel_path(path: str) -> str:
+    return str(path).replace("\\", "/").strip().strip("/").lower()

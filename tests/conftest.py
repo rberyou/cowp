@@ -94,6 +94,62 @@ sys.stdout.buffer.write(text.encode("utf-8"))
     return script
 
 
+@pytest.fixture
+def fake_svn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    bin_dir = tmp_path / "svn-bin"
+    bin_dir.mkdir()
+    script = bin_dir / ("svn.cmd" if os.name == "nt" else "svn")
+    helper = bin_dir / "fake_svn.py"
+    helper.write_text(
+        """
+from __future__ import annotations
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+log_path = os.environ.get("FAKE_SVN_LOG")
+if log_path:
+    path = Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as log:
+        log.write(" ".join(args) + "\\n")
+command = args[0] if args else ""
+if command == "status":
+    key = "FAKE_SVN_STATUS_U" if "-u" in args else "FAKE_SVN_STATUS"
+    sys.stdout.write(os.environ.get(key, ""))
+    raise SystemExit(0)
+if command == "info":
+    revision = os.environ.get("FAKE_SVN_REVISION", "12345")
+    url = os.environ.get("FAKE_SVN_URL", "https://svn.example.invalid/project/trunk")
+    sys.stdout.write(f"URL: {url}\\nRevision: {revision}\\n")
+    raise SystemExit(0)
+if command == "update":
+    if os.environ.get("FAKE_SVN_UPDATE_FAIL"):
+        sys.stderr.write("update failed\\n")
+        raise SystemExit(2)
+    sys.stdout.write(f"Updating '.':\\nAt revision {os.environ.get('FAKE_SVN_REVISION', '12345')}.\\n")
+    raise SystemExit(0)
+if command == "commit":
+    sys.stdout.write("fake commit called\\n")
+    raise SystemExit(0)
+sys.stderr.write("unsupported svn command: " + " ".join(args) + "\\n")
+raise SystemExit(2)
+""".lstrip(),
+        encoding="utf-8",
+    )
+    if os.name == "nt":
+        script.write_text(f"@echo off\r\n\"{sys.executable}\" \"{helper}\" %*\r\n", encoding="utf-8")
+    else:
+        script.write_text(
+            f"#!{sys.executable}\nimport runpy, sys\nsys.argv=[{str(helper)!r}, *sys.argv[1:]]\nrunpy.run_path({str(helper)!r}, run_name='__main__')\n",
+            encoding="utf-8",
+        )
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+    return script
+
+
 def write_manifest(repo: Path, tasks: list[dict]) -> Path:
     manifest = repo / ".codex-workerpool" / "tasks.json"
     write_json(manifest, {"tasks": tasks})
