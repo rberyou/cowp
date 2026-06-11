@@ -148,11 +148,11 @@ def run_controller_serial_tasks(
 
 
 def skip_integration_task(config: ProjectConfig, task: ManifestTask) -> int:
+    state = ensure_controller_serial_run_state(config, task)
     worktree = task_workspace(config, task)
     if not worktree.exists():
         raise RunnerError(f"{task.id}: workspace does not exist: {worktree}")
     states = StateStore(config.runs_root)
-    state = states.load().get(task.id)
     if state is None:
         states.update(task.id, status="planned", exit_code=0, error=None)
     else:
@@ -167,13 +167,13 @@ def skip_integration_task(config: ProjectConfig, task: ManifestTask) -> int:
 
 def run_one_task(config: ProjectConfig, task: ManifestTask) -> int:
     worker = worker_for_task(config, task)
+    state = ensure_controller_serial_run_state(config, task)
     worktree = task_workspace(config, task)
     if not worktree.exists():
         raise RunnerError(f"{task.id}: workspace does not exist: {worktree}")
-    state = StateStore(config.runs_root).load().get(task.id)
     if config.execution.strategy == EXECUTION_CONTROLLER_SERIAL:
-        expected_branch = state.controller_branch if state else None
-        if expected_branch and current_branch(worktree) != expected_branch:
+        expected_branch = state.controller_branch
+        if current_branch(worktree) != expected_branch:
             raise RunnerError(f"{task.id}: controller branch changed; expected {expected_branch}")
 
     run_dir = config.runs_root / task.id
@@ -361,3 +361,12 @@ def task_workspace(config: ProjectConfig, task: ManifestTask) -> Path:
             return Path(state.workspace_path or state.worktree).expanduser().resolve()
         return config.repo
     return task_worktree(config, task.id)
+
+
+def ensure_controller_serial_run_state(config: ProjectConfig, task: ManifestTask):
+    state = StateStore(config.runs_root).load().get(task.id)
+    if config.execution.strategy != EXECUTION_CONTROLLER_SERIAL:
+        return state
+    if not state or not state.controller_branch or not state.task_start_sha:
+        raise RunnerError(f"{task.id}: controller_serial run requires cowp start first")
+    return state

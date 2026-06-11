@@ -261,6 +261,32 @@ def test_controller_serial_start_refuses_existing_active_task(
     assert main(["start", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 1
 
 
+def test_controller_serial_run_requires_start_gate(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    cfg = default_config_data(git_repo)
+    cfg["execution"] = {"strategy": "controller_serial", "max_parallel": 1}
+    write_json(workerpool_config, cfg)
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "must start first",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+                "acceptance_command": None,
+            }
+        ],
+    )
+
+    assert main(["run", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-001"]) == 1
+    assert "# TASK-001" not in (git_repo / "src" / "example.py").read_text(encoding="utf-8")
+
+
 def test_controller_serial_run_all_refuses_multiple_runnable_tasks(
     git_repo: Path,
     workerpool_config: Path,
