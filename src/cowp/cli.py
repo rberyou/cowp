@@ -29,6 +29,22 @@ from cowp.config import (
     validate_project,
     write_json,
 )
+from cowp.final_review import (
+    FINAL_REVIEW_FINDING_STATUSES,
+    FINAL_REVIEW_FINDING_TYPES,
+    add_final_review_finding,
+    begin_final_review_loop,
+    commit_final_review_fix,
+    complete_final_review_loop,
+    ensure_target_review_record,
+    final_review_blockers_for_plan,
+    generate_final_review,
+    record_final_review_fix,
+    resolve_final_review_finding,
+    stop_final_review_loop,
+    target_review_blockers,
+    update_final_review_finding,
+)
 from cowp.gitops import (
     FinishError,
     GitError,
@@ -322,6 +338,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_single_plan_selection(plan_set_status)
     plan_set_status.add_argument("--status", required=True)
     plan_set_status.add_argument("--reason")
+    plan_set_status.add_argument("--manifest")
     plan_set_status.set_defaults(func=cmd_plan_set_status)
 
     plan_require_replan = plan_sub.add_parser("require-replan", help="block a task until replanning is resolved")
@@ -453,6 +470,101 @@ def build_parser() -> argparse.ArgumentParser:
     review_loop_stop_cmd.add_argument("--message", required=True)
     review_loop_stop_cmd.add_argument("--json", action="store_true")
     review_loop_stop_cmd.set_defaults(func=cmd_review_loop_stop)
+
+    final_review = sub.add_parser("final-review", help="manage target-branch final review state")
+    final_review_sub = final_review.add_subparsers(dest="final_review_command", required=True)
+
+    final_status = final_review_sub.add_parser("status", help="show target final review status")
+    add_repo_manifest(final_status)
+    final_status.add_argument("--target", required=True)
+    final_status.set_defaults(func=cmd_final_review_status)
+
+    final_review_cmd = final_review_sub.add_parser("review", help="generate target final review material")
+    add_repo_manifest(final_review_cmd)
+    final_review_cmd.add_argument("--target", required=True)
+    final_review_cmd.add_argument("--summary", action="store_true")
+    final_review_cmd.add_argument("--files", action="store_true")
+    final_review_cmd.add_argument("--file", action="append", default=[])
+    final_review_cmd.set_defaults(func=cmd_final_review_review)
+
+    final_begin = final_review_sub.add_parser("begin", help="begin or resume target final review loop")
+    add_repo_manifest(final_begin)
+    final_begin.add_argument("--target", required=True)
+    final_begin.add_argument("--max-rounds", type=int)
+    final_begin.add_argument("--stop-on-decision", action="store_true")
+    final_begin.add_argument("--json", action="store_true")
+    final_begin.set_defaults(func=cmd_final_review_begin)
+
+    final_record = final_review_sub.add_parser("record-fix", help="record a target final review fix attempt")
+    add_repo_manifest(final_record)
+    final_record.add_argument("--target", required=True)
+    final_record.add_argument("--summary", required=True)
+    final_record.add_argument("--file", action="append", default=[])
+    final_record.add_argument("--json", action="store_true")
+    final_record.set_defaults(func=cmd_final_review_record_fix)
+
+    final_commit = final_review_sub.add_parser("commit-fix", help="commit a reviewed final-review fix")
+    add_repo_manifest(final_commit)
+    final_commit.add_argument("--target", required=True)
+    final_commit.add_argument("--reviewed-files", nargs="*", default=[])
+    final_commit.add_argument("--message", required=True)
+    final_commit.add_argument("--acceptance-command")
+    final_commit.set_defaults(func=cmd_final_review_commit_fix)
+
+    final_complete = final_review_sub.add_parser("complete", help="mark target final review loop clean")
+    add_repo_manifest(final_complete)
+    final_complete.add_argument("--target", required=True)
+    final_complete.add_argument("--json", action="store_true")
+    final_complete.set_defaults(func=cmd_final_review_complete)
+
+    final_stop = final_review_sub.add_parser("stop", help="stop target final review loop on a blocker")
+    add_repo_manifest(final_stop)
+    final_stop.add_argument("--target", required=True)
+    final_stop.add_argument("--reason", required=True, choices=sorted(REVIEW_LOOP_STOP_REASONS))
+    final_stop.add_argument("--blocker", action="append", default=[])
+    final_stop.add_argument("--message", required=True)
+    final_stop.add_argument("--json", action="store_true")
+    final_stop.set_defaults(func=cmd_final_review_stop)
+
+    final_finding = final_review_sub.add_parser("finding", help="manage target final review findings")
+    final_finding_sub = final_finding.add_subparsers(dest="final_review_finding_command", required=True)
+
+    final_finding_add = final_finding_sub.add_parser("add", help="record a target final review finding")
+    add_repo_manifest(final_finding_add)
+    final_finding_add.add_argument("--target", required=True)
+    final_finding_add.add_argument("--type", required=True, choices=sorted(FINAL_REVIEW_FINDING_TYPES))
+    final_finding_add.add_argument("--severity", default="P2")
+    final_finding_add.add_argument("--message", required=True)
+    final_finding_add.add_argument("--file", action="append", default=[])
+    final_finding_add.add_argument("--contract-change", action="store_true")
+    final_finding_add.add_argument("--requires-decision", action="store_true")
+    final_finding_add.add_argument("--decision-reason")
+    final_finding_add.set_defaults(func=cmd_final_review_finding_add)
+
+    final_finding_update = final_finding_sub.add_parser("update", help="update a target final review finding")
+    add_repo_manifest(final_finding_update)
+    final_finding_update.add_argument("--target", required=True)
+    final_finding_update.add_argument("--finding", required=True)
+    final_finding_update.add_argument("--type", choices=sorted(FINAL_REVIEW_FINDING_TYPES))
+    final_finding_update.add_argument("--severity")
+    final_finding_update.add_argument("--message")
+    final_finding_update.add_argument("--status", choices=sorted(FINAL_REVIEW_FINDING_STATUSES))
+    final_finding_update.add_argument("--resolution")
+    final_finding_update.add_argument("--contract-change", action="store_true")
+    final_finding_update.add_argument("--clear-contract-change", action="store_true")
+    final_finding_update.add_argument("--requires-decision", action="store_true")
+    final_finding_update.add_argument("--decision-reason")
+    final_finding_update.add_argument("--clear-requires-decision", action="store_true")
+    final_finding_update.set_defaults(func=cmd_final_review_finding_update)
+
+    final_finding_resolve = final_finding_sub.add_parser("resolve", help="resolve a target final review finding")
+    add_repo_manifest(final_finding_resolve)
+    final_finding_resolve.add_argument("--target", required=True)
+    final_finding_resolve.add_argument("--finding", required=True)
+    final_finding_resolve.add_argument("--status", choices=["resolved", "invalid", "wontfix"], default="resolved")
+    final_finding_resolve.add_argument("--resolution", required=True)
+    final_finding_resolve.add_argument("--test-command")
+    final_finding_resolve.set_defaults(func=cmd_final_review_finding_resolve)
 
     finding = sub.add_parser("finding", help="manage execution review findings")
     finding_sub = finding.add_subparsers(dest="finding_command", required=True)
@@ -762,6 +874,11 @@ def cmd_plan_review_loop_stop(args: argparse.Namespace) -> int:
 def cmd_plan_set_status(args: argparse.Namespace) -> int:
     config = load_project_config(args.repo, args.pool_dir)
     plan = selected_plan(config, args)
+    if args.status == "done":
+        manifest = resolve_execution_manifest_for_done(config, args.manifest)
+        blockers = final_review_blockers_for_plan(config, manifest, plan)
+        if blockers:
+            raise ConfigError(f"{plan.feature_id}: final review blockers remain: {'; '.join(blockers)}")
     set_plan_status(config, plan, args.status, reason=args.reason)
     print(f"{plan.feature_id}: {args.status}")
     return 0
@@ -1357,6 +1474,176 @@ def cmd_review_loop_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_final_review_status(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    group, record = ensure_target_review_record(config, manifest, args.target, require_complete=False)
+    blockers = target_review_blockers(config, manifest, args.target)
+    _safe_print(f"# final review {args.target}")
+    _safe_print(f"group_id: {record.get('group_id') or group.group_id}")
+    _safe_print(f"status: {record.get('status')}")
+    _safe_print(f"base_ref: {record.get('base_ref')}")
+    _safe_print(f"base_sha: {record.get('base_sha')}")
+    _safe_print(f"target_head_sha: {record.get('target_head_sha')}")
+    _safe_print("tasks: " + (", ".join(record.get("task_ids") or []) or "none"))
+    _safe_print("features: " + (", ".join(record.get("feature_ids") or []) or "none"))
+    loop = record.get("review_loop") or {}
+    if loop.get("status") and loop.get("status") != "not_started":
+        _safe_print(f"review_loop: {loop.get('status')} round={loop.get('round', 0)}/{loop.get('max_rounds', config.review_loop.max_rounds)}")
+    if record.get("review_diff_path"):
+        _safe_print(f"review_diff: {record.get('review_diff_path')}")
+    if record.get("review_snapshot_hash"):
+        _safe_print(f"review_snapshot_hash: {record.get('review_snapshot_hash')}")
+    if blockers:
+        _safe_print("blockers:")
+        for blocker in blockers:
+            _safe_print(f"  - {blocker}")
+    else:
+        _safe_print("blockers: none")
+    return 0
+
+
+def cmd_final_review_review(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    review = generate_final_review(config, manifest, args.target, files=args.file or ())
+    group = review["group"]
+    _safe_print(f"# final review {group.target_branch}")
+    _safe_print(f"base_ref: {group.base_ref}")
+    _safe_print(f"base_sha: {group.base_sha}")
+    _safe_print(f"target_head_sha: {group.target_head_sha}")
+    _safe_print("tasks: " + ", ".join(task.id for task in group.tasks))
+    _safe_print("\n## diff stat")
+    _safe_print(review["diff_stat"] or "<no diff>")
+    if args.files:
+        _safe_print("\n## changed files")
+        _safe_print("\n".join(review["changed_files"]) if review["changed_files"] else "<no changed files>")
+        return 0
+    if args.summary:
+        _safe_print("\n## review files")
+        _safe_print(f"status: {review['status_path']}")
+        _safe_print(f"stat: {review['stat_path']}")
+        _safe_print(f"diff: {review['diff_path']}")
+        _safe_print(f"snapshot: {review['snapshot_hash']}")
+        return 0
+    _safe_print("\n## diff")
+    _safe_print(review["diff"] or "<no diff>")
+    return 0
+
+
+def cmd_final_review_begin(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    record = begin_final_review_loop(
+        config,
+        manifest,
+        args.target,
+        max_rounds=args.max_rounds,
+        stop_on_decision=args.stop_on_decision,
+    )
+    print_review_loop(str(record.get("target_branch") or args.target), record["review_loop"], json_output=args.json, include_max=True)
+    return 0
+
+
+def cmd_final_review_record_fix(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    record = record_final_review_fix(config, manifest, args.target, summary=args.summary, files=args.file or ())
+    print_review_loop(str(record.get("target_branch") or args.target), record["review_loop"], json_output=args.json)
+    return 0
+
+
+def cmd_final_review_commit_fix(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    result = commit_final_review_fix(
+        config,
+        manifest,
+        args.target,
+        reviewed_files=args.reviewed_files,
+        message=args.message,
+        acceptance_command=args.acceptance_command,
+    )
+    _safe_print(f"{result.target_branch}: final-review fix committed {result.commit_sha}")
+    _safe_print(f"  worktree: {result.worktree}")
+    return 0
+
+
+def cmd_final_review_complete(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    record = complete_final_review_loop(config, manifest, args.target)
+    print_review_loop(str(record.get("target_branch") or args.target), record["review_loop"], json_output=args.json)
+    return 0
+
+
+def cmd_final_review_stop(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    record = stop_final_review_loop(
+        config,
+        manifest,
+        args.target,
+        reason=args.reason,
+        blockers=tuple(args.blocker or ()),
+        message=args.message,
+    )
+    print_review_loop(str(record.get("target_branch") or args.target), record["review_loop"], json_output=args.json, include_round=False)
+    return 0
+
+
+def cmd_final_review_finding_add(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    record = add_final_review_finding(
+        config,
+        manifest,
+        args.target,
+        finding_type=args.type,
+        severity=args.severity,
+        message=args.message,
+        files=args.file,
+        contract_change=args.contract_change,
+        requires_decision=args.requires_decision,
+        decision_reason=args.decision_reason,
+    )
+    findings = record.get("review_findings") or []
+    finding = findings[-1]
+    _safe_print(f"{args.target}: added {finding['id']}")
+    return 0
+
+
+def cmd_final_review_finding_update(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    if args.status in {"resolved", "invalid", "wontfix"} and not args.resolution:
+        raise ConfigError(f"{args.finding}: --resolution is required when closing a finding")
+    update_final_review_finding(
+        config,
+        manifest,
+        args.target,
+        args.finding,
+        type=args.type,
+        severity=args.severity,
+        message=args.message,
+        status=args.status,
+        resolution=args.resolution,
+        contract_change=args.contract_change,
+        clear_contract_change=args.clear_contract_change,
+        requires_decision=args.requires_decision,
+        decision_reason=args.decision_reason,
+        clear_requires_decision=args.clear_requires_decision,
+    )
+    _safe_print(f"{args.target}: updated {args.finding}")
+    return 0
+
+
+def cmd_final_review_finding_resolve(args: argparse.Namespace) -> int:
+    config, manifest = load_inputs(args)
+    resolve_final_review_finding(
+        config,
+        manifest,
+        args.target,
+        args.finding,
+        status=args.status,
+        resolution=args.resolution,
+        test_command=args.test_command,
+    )
+    _safe_print(f"{args.target}: {args.finding} {args.status}")
+    return 0
+
+
 def cmd_finding_add(args: argparse.Namespace) -> int:
     config, manifest = load_inputs(args)
     task = manifest.get_task(args.task)
@@ -1602,6 +1889,15 @@ def load_inputs(args: argparse.Namespace) -> tuple[ProjectConfig, Manifest]:
     config = load_project_config(args.repo, getattr(args, "pool_dir", None))
     manifest = load_manifest(config, args.manifest)
     return config, manifest
+
+
+def resolve_execution_manifest_for_done(config: ProjectConfig, manifest_path: str | None) -> Manifest:
+    if manifest_path:
+        return load_manifest(config, manifest_path)
+    default = config.pool_root / "tasks.json"
+    if default.is_file():
+        return load_manifest(config, default)
+    raise ConfigError("final review requires an execution manifest")
 
 
 def prepublish_loop_batch(config: ProjectConfig, requested_batch: str | None) -> str | None:

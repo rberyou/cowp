@@ -397,6 +397,10 @@ def dashboard_html(refresh_ms: int) -> str:
       </div>
     </section>
     <section id="board" class="board" aria-label="Kanban board"></section>
+    <section class="panel final-review">
+      <h2>Final Review</h2>
+      <div id="final-reviews"></div>
+    </section>
     <section class="panel unassigned">
       <h2>Unassigned</h2>
       <div id="unassigned"></div>
@@ -568,6 +572,48 @@ def dashboard_html(refresh_ms: int) -> str:
       return details;
     }}
 
+    function renderFinalReview(review) {{
+      const root = el('div', 'task');
+      const main = el('div', 'task-main');
+      main.appendChild(el('span', 'task-title', review.target_branch));
+      const badges = el('div', 'task-badges');
+      badges.appendChild(badge(review.status || 'waiting_for_tasks', text(review.status || 'waiting_for_tasks')));
+      main.appendChild(badges);
+      root.appendChild(main);
+      const blockers = (review.blockers || []).join('; ');
+      const findings = (review.review_findings || []).join('; ');
+      const loopBlockedBy = (review.review_loop_blocked_by || []).join(', ');
+      const needsReview = review.review_loop_needs_review ? ' needs_review=true' : '';
+      const loop = review.review_loop_status && review.review_loop_status !== 'not_started'
+        ? review.review_loop_status + ' round=' + text(review.review_loop_round) + '/' + text(review.review_loop_max_rounds) + (loopBlockedBy ? ' blocked_by=' + loopBlockedBy : '') + needsReview
+        : '';
+      if (blockers) root.appendChild(el('p', 'note warn', 'Blocked by: ' + blockers));
+      if (findings) root.appendChild(el('p', 'note danger', 'Findings: ' + findings));
+      if (loop) root.appendChild(el('p', 'note', 'Final review loop: ' + loop));
+      const meta = el('details', 'task-meta');
+      meta.appendChild(el('summary', '', 'Details'));
+      const grid = el('div', 'task-grid');
+      const pairs = [
+        ['group', review.group_id],
+        ['tasks', (review.task_ids || []).join(', ')],
+        ['features', (review.feature_ids || []).join(', ')],
+        ['target_head', review.target_head_sha],
+        ['review', review.review_diff_path],
+        ['review_hash', review.review_snapshot_hash],
+        ['current_hash', review.current_snapshot_hash],
+        ['worktree', review.worktree],
+        ['created_worktree', review.created_worktree ? 'true' : 'false'],
+      ];
+      for (const [key, value] of pairs) {{
+        if (!hasValue(value)) continue;
+        grid.appendChild(el('div', '', key));
+        grid.appendChild(el('div', '', value));
+      }}
+      meta.appendChild(grid);
+      root.appendChild(meta);
+      return root;
+    }}
+
     function renderSnapshot(snapshot) {{
       lastSnapshot = snapshot;
       document.getElementById('repo').textContent = text(snapshot.repo);
@@ -593,6 +639,16 @@ def dashboard_html(refresh_ms: int) -> str:
         }}
         col.appendChild(features);
         board.appendChild(col);
+      }}
+
+      const finalReviews = document.getElementById('final-reviews');
+      finalReviews.replaceChildren();
+      if (snapshot.final_reviews && snapshot.final_reviews.length) {{
+        const tasks = el('div', 'tasks');
+        for (const review of snapshot.final_reviews) tasks.appendChild(renderFinalReview(review));
+        finalReviews.appendChild(tasks);
+      }} else {{
+        finalReviews.appendChild(el('div', 'empty', 'No final review groups'));
       }}
 
       const unassigned = document.getElementById('unassigned');

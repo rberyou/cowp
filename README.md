@@ -99,6 +99,16 @@ cowp review-loop complete --repo G:\workspace\Project --pool-dir G:\workspace\Pr
 cowp finish --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --task TASK-001 --reviewed-files src/example.py tests/test_example.py
 ```
 
+After every task that targets the same branch has finished, run the target
+final review loop before marking the feature done or publishing:
+
+```powershell
+cowp final-review begin --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --target codex/my-feature
+cowp final-review review --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --target codex/my-feature --summary
+cowp final-review complete --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --target codex/my-feature
+cowp plan set-status --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --manifest tasks.json --plan plans\FEATURE-001.plan.json --status done
+```
+
 For SVN+Git projects, verify a finished publish batch before the human SVN
 commit:
 
@@ -248,6 +258,33 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
 - `finish` records reviewed files, final diff snapshot, acceptance command
   results, and finish attempts in `runs_root/state.json`.
 - Worker merge is intentionally serial and controlled by Codex.
+- After every active manifest task targeting a branch is merged, run
+  `cowp final-review begin`, `cowp final-review review`, and
+  `cowp final-review complete` for that target branch. This target-level loop
+  reviews the combined branch diff against the concrete pre-task baseline.
+- Final review state is stored in `runs_root/state.json` under
+  `target_reviews`, using `FRF-NNN` finding ids for target-level findings.
+- `cowp final-review review` supports `--summary`, `--files`, and repeated
+  `--file <path>` output shaping while still writing review material under
+  `runs_root/final-review/<group-id>/`.
+- `cowp final-review commit-fix` is only for non-decision fixes reviewed by
+  Codex on the target branch. It stages only explicit `--reviewed-files`, runs
+  the configured acceptance command, records the fix commit, and requires a
+  fresh final review before completion.
+- `cowp final-review record-fix` and `cowp final-review commit-fix` require a
+  started final review loop. Reviewed paths must be relative repository paths;
+  absolute paths, parent traversal, wildcards, and Git pathspec magic are
+  refused.
+- Decision findings, boundary changes, API/schema changes, destructive actions,
+  and large cross-boundary follow-up work must stop the final review loop or
+  become new tasks instead of being committed as final-review fixes.
+- `cowp plan set-status --status done --manifest tasks.json` blocks feature
+  completion until every target branch touched by the feature has a clean,
+  fresh final review. When `--manifest` is omitted, `cowp` tries the pool
+  `tasks.json`; if no execution manifest exists, the done gate refuses instead
+  of skipping final review.
+- Final review does not block `start`, `run`, or individual `finish` operations.
+  It blocks feature completion and publish/prepublish readiness.
 
 ## SVN+Git Publish Batches
 
@@ -267,8 +304,8 @@ conflict, missing, obstructed, switched, unversioned, or out-of-date states.
 
 `cowp prepublish` verifies a selected publish batch before a manual SVN commit.
 It checks task completion, open review findings, Git commit range, Git/SVN
-changed-file match, SVN conflict/out-of-date status, and final acceptance. It
-writes:
+changed-file match, SVN conflict/out-of-date status, clean target final review,
+and final acceptance. It writes:
 
 - `runs_root/prepublish/BATCH-NNN/report.md`
 - `runs_root/prepublish/BATCH-NNN/report.json`
@@ -323,3 +360,7 @@ Use `--no-open` to disable browser auto-open. `backlog serve` accepts only loopb
 - `/`
 - `/api/backlog.json`
 - `/api/health`
+
+The dashboard includes a Final Review panel. It shows target branch review
+groups separately from task cards, including waiting tasks, loop status, open
+findings, latest fix evidence, and stale or clean gate state.
