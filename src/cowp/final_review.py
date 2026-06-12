@@ -34,6 +34,8 @@ from cowp.gitops import (
 from cowp.planning import FeaturePlan, load_all_plans
 from cowp.queries import WorkflowQueries, review_finding_blockers
 from cowp.review_loop import (
+    REVIEW_LOOP_STOP_STATUSES,
+    REVIEW_LOOP_STATUSES,
     active_finding_blockers,
     apply_decision_classification,
     begin_review_loop,
@@ -374,7 +376,7 @@ def record_final_review_fix(
     files: Iterable[str],
 ) -> dict[str, Any]:
     group, record = ensure_target_review_record(config, manifest, target_branch)
-    _ensure_final_review_loop_started(record, "record-fix")
+    _ensure_final_review_loop_active(record, "record-fix")
     if not group.base_sha:
         raise ConfigError(f"{target_branch}: final review base is missing")
     changed_files = _normalize_paths(files)
@@ -627,7 +629,7 @@ def commit_final_review_fix(
     acceptance_command: str | None = None,
 ) -> FinalReviewCommitResult:
     group, record = ensure_target_review_record(config, manifest, target_branch)
-    _ensure_final_review_loop_started(record, "commit-fix")
+    _ensure_final_review_loop_active(record, "commit-fix")
     files = _normalize_paths(reviewed_files)
     if not files:
         raise ConfigError("final-review commit-fix requires --reviewed-files")
@@ -930,11 +932,16 @@ def _review_loop_after_finding_change(
     return loop if isinstance(loop, dict) else None
 
 
-def _ensure_final_review_loop_started(record: dict[str, Any], command: str) -> None:
+def _ensure_final_review_loop_active(record: dict[str, Any], command: str) -> None:
     loop = record.get("review_loop") if isinstance(record.get("review_loop"), dict) else {}
-    if str(loop.get("status") or "not_started") == "not_started":
-        target = str(record.get("target_branch") or "target")
+    status = str(loop.get("status") or "not_started")
+    target = str(record.get("target_branch") or "target")
+    if status == "not_started":
         raise ConfigError(f"{target}: final-review {command} requires review-loop begin")
+    if status not in REVIEW_LOOP_STATUSES:
+        raise ConfigError(f"{target}: final-review {command} has invalid review loop status: {status}")
+    if status == "clean" or status in REVIEW_LOOP_STOP_STATUSES:
+        raise ConfigError(f"{target}: final-review {command} requires an active review loop; current status is {status}")
 
 
 def _save_target_review(

@@ -163,6 +163,9 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
 - Features may depend on other features with `depends_on_features`; those
   dependencies use query-layer feature completion, normally explicit
   `status: done` or all upstream tasks merged.
+- Setting a feature to `done` with `cowp plan set-status --status done` is
+  stricter than dependency inference: it also requires a resolved execution
+  manifest and clean, fresh target final review gates.
 - Plan validation rejects ready tasks when the task branch or configured task
   worktree path already exists. Choose a fresh task id or explicitly clean up
   the old branch/worktree before export.
@@ -271,10 +274,10 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
   Codex on the target branch. It stages only explicit `--reviewed-files`, runs
   the configured acceptance command, records the fix commit, and requires a
   fresh final review before completion.
-- `cowp final-review record-fix` and `cowp final-review commit-fix` require a
-  started final review loop. Reviewed paths must be relative repository paths;
-  absolute paths, parent traversal, wildcards, and Git pathspec magic are
-  refused.
+- `cowp final-review record-fix` and `cowp final-review commit-fix` require an
+  active final review loop. They refuse `clean` and `blocked_*` loop states.
+  Reviewed paths must be relative repository paths; absolute paths, parent
+  traversal, wildcards, and Git pathspec magic are refused.
 - Decision findings, boundary changes, API/schema changes, destructive actions,
   and large cross-boundary follow-up work must stop the final review loop or
   become new tasks instead of being committed as final-review fixes.

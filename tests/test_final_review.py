@@ -424,6 +424,111 @@ def test_final_review_decision_finding_stops_loop(
     assert record["status"] == "blocked_decision"
     assert record["review_loop"]["status"] == "blocked_decision"
     assert record["review_loop"]["blocked_by"] == ["FRF-001"]
+    assert (
+        main(
+            [
+                "final-review",
+                "record-fix",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--target",
+                target,
+                "--summary",
+                "should not be allowed",
+                "--file",
+                "src/example.py",
+            ]
+        )
+        == 1
+    )
+    (git_repo / "src" / "example.py").write_text((git_repo / "src" / "example.py").read_text(encoding="utf-8") + "# blocked\n", encoding="utf-8")
+    assert (
+        main(
+            [
+                "final-review",
+                "commit-fix",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--target",
+                target,
+                "--reviewed-files",
+                "src/example.py",
+                "--message",
+                "should not be allowed",
+            ]
+        )
+        == 1
+    )
+
+
+def test_final_review_fix_commands_reject_invalid_loop_status(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "change src",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+                "feature_id": "FEATURE-001",
+            }
+        ],
+    )
+    target = current_branch(git_repo)
+    _finish_task(git_repo, manifest, "TASK-001", "src/example.py")
+    assert main(["final-review", "begin", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target]) == 0
+
+    store = StateStore(load_project_config(git_repo).runs_root)
+    group_id = next(iter(store.load_target_reviews()))
+    store.update_target_review(group_id, status="reviewing", review_loop={"status": "surprise", "round": 1})
+
+    assert (
+        main(
+            [
+                "final-review",
+                "record-fix",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--target",
+                target,
+                "--summary",
+                "should not be allowed",
+                "--file",
+                "src/example.py",
+            ]
+        )
+        == 1
+    )
+    assert (
+        main(
+            [
+                "final-review",
+                "commit-fix",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--target",
+                target,
+                "--reviewed-files",
+                "src/example.py",
+                "--message",
+                "should not be allowed",
+            ]
+        )
+        == 1
+    )
 
 
 def test_final_review_complete_requires_review_after_begin(

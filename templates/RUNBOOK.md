@@ -149,6 +149,9 @@ remain blocked and must not start or run yet.
 For feature-level dependencies, add `depends_on_features` to the plan JSON. A
 feature dependency uses query-layer feature completion, normally explicit
 `status: done` or all upstream tasks merged.
+Setting a feature to `done` with `cowp plan set-status --status done` is
+stricter than dependency inference: it also requires a resolved execution
+manifest and clean, fresh target final review gates.
 
 For downstream tasks, record the dependency contract in the plan before marking
 the task ready. Exported prompts include those contracts so workers do not rely
@@ -584,9 +587,10 @@ cowp final-review review `
   --summary
 ```
 
-`record-fix` and `commit-fix` require the final review loop to be started with
-`begin`. Reviewed paths must be relative repository paths; absolute paths,
-parent traversal, wildcards, and Git pathspec magic are refused.
+`record-fix` and `commit-fix` require an active final review loop after
+`begin`; they refuse `clean` and `blocked_*` loop states. Reviewed paths must be
+relative repository paths; absolute paths, parent traversal, wildcards, and Git
+pathspec magic are refused.
 
 Resolve the finding after the re-review confirms the fix:
 

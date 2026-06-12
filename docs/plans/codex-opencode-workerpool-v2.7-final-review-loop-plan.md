@@ -139,12 +139,14 @@ Publishing:
 
 Fixes:
 
-- `commit-fix` resolves a clean target-branch worktree before editing. Prefer an
-  existing clean worktree already checked out to the target branch. If none
-  exists, use the controller repository only when it is clean and can switch to
-  the target branch. If Git reports the target branch is already checked out
-  elsewhere, or the controller worktree cannot switch cleanly, create or reuse a
-  dedicated final-review worktree under `worktree_root/_final/<group-id>`.
+- `commit-fix` resolves a target-branch worktree before committing. Prefer an
+  existing target worktree whose only changes are the explicitly reviewed files;
+  otherwise prefer an existing clean worktree already checked out to the target
+  branch. If none exists, use the controller repository only when it is clean
+  and can switch to the target branch. If Git reports the target branch is
+  already checked out elsewhere, or the controller worktree cannot switch
+  cleanly, create or reuse a dedicated final-review worktree under
+  `worktree_root/_final/<group-id>`.
 - `record-fix` and `commit-fix` require an active final review loop; they do not
   implicitly replace `final-review begin`.
 - It stages only explicitly reviewed files.
@@ -211,9 +213,10 @@ Unit tests:
 - Decision finding classification blocks final review completion.
 - `commit-fix` stages only reviewed files and rejects unreviewed dirty or
   untracked files.
-- `commit-fix` selects a clean existing target worktree, switches the clean
-  controller worktree only when legal, or creates a dedicated final-review
-  worktree when the target branch is checked out elsewhere.
+- `commit-fix` prefers an existing target worktree whose only dirty files are
+  explicitly reviewed files, otherwise selects a clean existing target worktree,
+  switches the clean controller worktree only when legal, or creates a dedicated
+  final-review worktree when the target branch is checked out elsewhere.
 - `complete` cleans only final-review-owned worktrees under
   `worktree_root/_final` and preserves reused worktrees.
 - New target branch commits make an existing clean final review stale.

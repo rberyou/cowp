@@ -68,11 +68,15 @@ Tasks can be marked:
 - `ready`: passed review and can be copied into the execution manifest
 - `exported`: copied into the execution manifest; execution status still lives
   in `runs_root/state.json`
-- `done`: feature-level terminal state; all non-dropped tasks have merged
+- `done`: feature-level terminal state; all non-dropped tasks have completed
+  and every related target final review is clean and fresh
 
 Feature plans may also use `depends_on_features`. A feature dependency uses
 query-layer feature completion, normally explicit `status: done` or all
 upstream tasks merged.
+Setting a feature to `done` with `cowp plan set-status --status done` is
+stricter than dependency inference: it also requires a resolved execution
+manifest and clean, fresh target final review gates.
 
 ### 5. Review Gate
 
