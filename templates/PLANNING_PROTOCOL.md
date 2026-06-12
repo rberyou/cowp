@@ -89,7 +89,8 @@ Required output:
 
 Review passes only when:
 
-- There are no unresolved findings that would force a worker to invent product behavior or architecture.
+- There are no open or active blocking findings that would force a worker to
+  invent product behavior or architecture.
 - API, data, and state-transition contracts are explicit enough to test.
 - Core domain terms are consistent across public APIs, persistence, generated
   artifacts, helper/skill commands, and user-facing docs. If a term maps to a
@@ -114,7 +115,8 @@ A task is ready only when all of these are true:
 - Implementation worker prompts name non-goals and forbidden operations.
 - Integration tasks are reserved for controller work that should be done by
   Codex instead of delegated to an OpenCode worker.
-- All open decisions and review findings are resolved.
+- All open decisions, open replan blockers, and open or active blocking review
+  findings are resolved or reclassified with audit evidence.
 - For `worktree_parallel`, the task branch does not collide with an existing
   branch: `agent/TASK-NNN` for implementation tasks, or `target_branch` /
   `integration/TASK-NNN` for integration tasks.
@@ -130,6 +132,18 @@ Use the machine-readable plan file as the source of truth:
 ```powershell
 cowp plan validate --repo . --plan plans/FEATURE-001.plan.json
 ```
+
+Run the planning review loop before moving a feature or task to ready:
+
+```powershell
+cowp plan review-loop begin --repo . --pool-dir ..\Project.workerpool --plan plans/FEATURE-001.plan.json
+cowp plan review-loop record-fix --repo . --pool-dir ..\Project.workerpool --plan plans/FEATURE-001.plan.json --summary "fixed planning drift" --file plans/FEATURE-001.plan.json
+cowp plan validate --repo . --pool-dir ..\Project.workerpool --plan plans/FEATURE-001.plan.json
+cowp plan review-loop complete --repo . --pool-dir ..\Project.workerpool --plan plans/FEATURE-001.plan.json
+```
+
+If review finds a product, API, schema, architecture, dependency, or task-boundary
+decision, record it and stop the loop instead of moving to ready.
 
 For an external control directory, use pool-relative paths:
 

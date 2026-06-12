@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,19 @@ from cowp.config import (
 )
 from cowp.gitops import branch_exists, task_branch, task_worktree
 from cowp.queries import WorkflowQueries, dependency_metadata_dict
+from cowp.review_loop import (
+    active_finding_blockers,
+    apply_decision_classification,
+    begin_review_loop,
+    default_review_loop,
+    decision_finding_blockers,
+    mark_review_loop_clean,
+    mark_review_loop_fix,
+    review_loop_gate_blockers,
+    review_loop_fingerprint,
+    stop_review_loop,
+    validate_review_loop,
+)
 from cowp.state import StateStore, now_iso
 
 FEATURE_ID_RE = re.compile(r"^FEATURE-\d{3,}$")
@@ -95,6 +109,7 @@ class FeaturePlan:
     markdown_raw: str | None
     open_decisions: tuple[PlanDecision, ...]
     review_findings: tuple[PlanFinding, ...]
+    review_loop: dict[str, Any]
     audit_events: tuple[dict[str, Any], ...]
     tasks: tuple[PlanTask, ...]
 
@@ -193,6 +208,9 @@ def parse_plan(pool_root: Path, path: Path, data: dict[str, Any]) -> FeaturePlan
         markdown_raw=markdown_raw,
         open_decisions=decisions,
         review_findings=findings,
+        review_loop=dict(data.get("review_loop"))
+        if isinstance(data.get("review_loop"), dict)
+        else default_review_loop(),
         audit_events=tuple(dict(item) for item in data.get("audit_events") or [] if isinstance(item, dict)),
         tasks=tasks,
     )
@@ -207,9 +225,11 @@ def validate_plan(config: ProjectConfig, plan: FeaturePlan) -> ValidationResult:
         result.errors.append(f"invalid feature status: {plan.status}")
     if plan.markdown and not _is_inside(plan.markdown, _plans_root(config)):
         result.errors.append(f"feature markdown must be under pool plans/: {plan.markdown}")
+    for error in validate_review_loop(plan.review_loop):
+        result.errors.append(f"{plan.feature_id}: {error}")
 
     unresolved_decisions = [item.id for item in plan.open_decisions if item.status != "resolved"]
-    unresolved_findings = [item.id for item in plan.review_findings if item.status != "resolved"]
+    finding_blockers = active_finding_blockers(plan.review_findings)
     unresolved_replans = [
         blocker.id
         for task in plan.tasks
@@ -219,10 +239,13 @@ def validate_plan(config: ProjectConfig, plan: FeaturePlan) -> ValidationResult:
     has_ready_task = any(task.status in EXPORTABLE_TASK_STATUSES for task in plan.tasks)
     if (plan.status in GATED_FEATURE_STATUSES or has_ready_task) and unresolved_decisions:
         result.errors.append("unresolved open decisions block ready/export: " + ", ".join(unresolved_decisions))
-    if (plan.status in GATED_FEATURE_STATUSES or has_ready_task) and unresolved_findings:
-        result.errors.append("unresolved review findings block ready/export: " + ", ".join(unresolved_findings))
+    if (plan.status in GATED_FEATURE_STATUSES or has_ready_task) and finding_blockers:
+        result.errors.append("unresolved review findings block ready/export: " + ", ".join(finding_blockers))
     if (plan.status in GATED_FEATURE_STATUSES or has_ready_task) and unresolved_replans:
         result.errors.append("unresolved replan blockers block ready/export: " + ", ".join(unresolved_replans))
+    loop_blockers = review_loop_gate_blockers(plan.review_loop, "planning review loop")
+    if (plan.status in GATED_FEATURE_STATUSES or has_ready_task) and loop_blockers:
+        result.errors.append("planning review loop blocks ready/export: " + ", ".join(loop_blockers))
 
     seen: set[str] = set()
     task_ids = {task.id for task in plan.tasks}
@@ -695,6 +718,7 @@ def _default_plan_data(feature_id: str, title: str, markdown_path: Path, repo: P
         "markdown": _pool_relative(repo, markdown_path),
         "open_decisions": [],
         "review_findings": [],
+        "review_loop": default_review_loop(),
         "audit_events": [],
         "tasks": [],
     }
@@ -737,7 +761,7 @@ Source: `<user request, document path, ticket, or discussion>`
 
 ### Result
 
-- `<No unresolved findings>` or `<remaining blockers>`
+- `<No open or active blocking findings>` or `<remaining blockers>`
 
 ## Ready Task Breakdown
 
@@ -1311,25 +1335,78 @@ def add_plan_finding(
     severity: str = "P2",
     finding_type: str = "design",
     contract_change: bool = False,
+    requires_decision: bool = False,
+    decision_reason: str | None = None,
 ) -> str:
     data = _plan_data(plan)
     findings = data.setdefault("review_findings", [])
     if not isinstance(findings, list):
         raise ConfigError("review_findings must be an array")
     finding_id = _next_id(findings, "F")
-    findings.append(
-        {
-            "id": finding_id,
-            "status": "open",
-            "severity": severity,
-            "type": finding_type,
-            "message": message,
-            "contract_change": bool(contract_change),
-        }
-    )
+    finding = {
+        "id": finding_id,
+        "status": "open",
+        "severity": severity,
+        "type": finding_type,
+        "message": message,
+        "contract_change": bool(contract_change),
+        "loop_round": int((data.get("review_loop") or {}).get("round") or 0)
+        if isinstance(data.get("review_loop"), dict)
+        else 0,
+    }
+    try:
+        apply_decision_classification(
+            finding,
+            requires_decision=requires_decision,
+            decision_reason=decision_reason,
+            explicit_requires_decision=requires_decision,
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    findings.append(finding)
     _append_plan_audit(data, "plan add-finding", f"added {finding_id}", finding_id=finding_id)
     write_json(plan.path, data)
     return finding_id
+
+
+def update_plan_finding(
+    plan: FeaturePlan,
+    finding_id: str,
+    *,
+    severity: str | None = None,
+    finding_type: str | None = None,
+    message: str | None = None,
+    contract_change: bool = False,
+    clear_contract_change: bool = False,
+    requires_decision: bool = False,
+    decision_reason: str | None = None,
+    clear_requires_decision: bool = False,
+) -> None:
+    data = _plan_data(plan)
+    finding = _raw_item(data.get("review_findings") or [], finding_id, "finding")
+    before = dict(finding)
+    if severity:
+        finding["severity"] = severity
+    if finding_type:
+        finding["type"] = finding_type
+    if message:
+        finding["message"] = message
+    if contract_change:
+        finding["contract_change"] = True
+    if clear_contract_change:
+        finding["contract_change"] = False
+    try:
+        apply_decision_classification(
+            finding,
+            requires_decision=requires_decision,
+            decision_reason=decision_reason,
+            clear_requires_decision=clear_requires_decision,
+            explicit_requires_decision=requires_decision,
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    _append_plan_audit(data, "plan update-finding", f"updated {finding_id}", finding_id=finding_id, before=before, after=dict(finding))
+    write_json(plan.path, data)
 
 
 def resolve_plan_finding(plan: FeaturePlan, finding_id: str, resolution: str) -> None:
@@ -1354,9 +1431,7 @@ def set_plan_status(config: ProjectConfig, plan: FeaturePlan, status: str, reaso
     if status in {"ready", "reviewed"}:
         candidate = dict(data)
         candidate["status"] = status
-        result = validate_plan_collection(config, (parse_plan(config.pool_root, plan.path, candidate),))
-        if result.errors:
-            raise ConfigError("; ".join(result.errors))
+        _validate_candidate_plan(config, plan, candidate)
     if status == "blocked" and not reason:
         raise ConfigError("setting blocked requires --reason")
     if previous in {"ready", "exported"} and status in {"draft", "review", "reviewed"}:
@@ -1397,6 +1472,91 @@ def resolve_replan(config: ProjectConfig, plan: FeaturePlan, blocker_id: str, re
     _append_plan_audit(data, "plan resolve-replan", f"resolved {blocker_id}", blocker_id=blocker_id)
     _validate_candidate_plan(config, plan, data)
     write_json(plan.path, data)
+
+
+def begin_plan_review_loop(
+    config: ProjectConfig,
+    plan: FeaturePlan,
+    max_rounds: int | None = None,
+    stop_on_decision: bool = False,
+) -> dict[str, Any]:
+    data = _plan_data(plan)
+    now = now_iso()
+    decision_blockers = _plan_decision_blockers(plan)
+    if (config.review_loop.stop_on_decision or stop_on_decision) and decision_blockers:
+        loop = stop_review_loop(
+            data.get("review_loop"),
+            "blocked_decision",
+            decision_blockers,
+            "decision blocker prevents automatic planning review loop",
+            now,
+        )
+        data["review_loop"] = loop
+        _append_plan_audit(data, "plan review-loop stop", "blocked_decision", blockers=decision_blockers)
+        write_json(plan.path, data)
+        return loop
+    loop = begin_review_loop(data.get("review_loop"), max_rounds or config.review_loop.max_rounds, now)
+    data["review_loop"] = loop
+    _append_plan_audit(data, "plan review-loop begin", f"round {loop['round']}", review_loop=loop)
+    write_json(plan.path, data)
+    return loop
+
+
+def record_plan_review_loop_fix(
+    config: ProjectConfig,
+    plan: FeaturePlan,
+    summary: str,
+    files: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    data = _plan_data(plan)
+    normalized_files = _validate_plan_review_loop_files(config, plan, files)
+    now = now_iso()
+    fingerprint = review_loop_fingerprint(
+        data.get("review_findings") or [],
+        snapshot_hash=_plan_content_hash(plan),
+        changed_files=normalized_files,
+    )
+    loop = mark_review_loop_fix(data.get("review_loop"), summary, normalized_files, now, fingerprint=fingerprint)
+    data["review_loop"] = loop
+    _append_plan_audit(
+        data,
+        "plan review-loop record-fix",
+        summary,
+        files=list(normalized_files),
+        fingerprint=fingerprint,
+    )
+    write_json(plan.path, data)
+    return loop
+
+
+def complete_plan_review_loop(config: ProjectConfig, plan: FeaturePlan) -> dict[str, Any]:
+    blockers = _plan_review_loop_blockers(plan)
+    validation = validate_plan_collection(config, _plan_collection_with_candidate(config, plan, _plan_data(plan)))
+    blockers.extend(validation.errors)
+    if blockers:
+        raise ConfigError(f"{plan.feature_id}: review loop is blocked: {'; '.join(blockers)}")
+    data = _plan_data(plan)
+    now = now_iso()
+    loop = mark_review_loop_clean(data.get("review_loop"), now)
+    data["review_loop"] = loop
+    _append_plan_audit(data, "plan review-loop complete", f"round {loop.get('round', 0)} clean")
+    write_json(plan.path, data)
+    return loop
+
+
+def stop_plan_review_loop(
+    plan: FeaturePlan,
+    status: str,
+    blockers: tuple[str, ...],
+    reason: str,
+) -> dict[str, Any]:
+    data = _plan_data(plan)
+    now = now_iso()
+    loop = stop_review_loop(data.get("review_loop"), status, blockers, reason, now)
+    data["review_loop"] = loop
+    _append_plan_audit(data, "plan review-loop stop", status, blockers=list(blockers), reason=reason)
+    write_json(plan.path, data)
+    return loop
 
 
 def link_plan_replacement(
@@ -1551,6 +1711,68 @@ def _task_has_open_replan(raw: dict[str, Any]) -> bool:
     )
 
 
+def _plan_review_loop_blockers(plan: FeaturePlan) -> list[str]:
+    blockers: list[str] = []
+    blockers.extend(f"{item.id} open decision" for item in plan.open_decisions if item.status != "resolved")
+    blockers.extend(active_finding_blockers(plan.review_findings))
+    blockers.extend(
+        f"{blocker.id} open replan"
+        for task in plan.tasks
+        for blocker in task.replan_blockers
+        if blocker.status in REPLAN_OPEN_STATUSES
+    )
+    return blockers
+
+
+def _plan_decision_blockers(plan: FeaturePlan) -> list[str]:
+    blockers: list[str] = []
+    blockers.extend(item.id for item in plan.open_decisions if item.status != "resolved")
+    blockers.extend(decision_finding_blockers(plan.review_findings))
+    blockers.extend(
+        blocker.id
+        for task in plan.tasks
+        for blocker in task.replan_blockers
+        if blocker.status in REPLAN_OPEN_STATUSES
+    )
+    return blockers
+
+
+def _validate_plan_review_loop_files(
+    config: ProjectConfig,
+    plan: FeaturePlan,
+    files: tuple[str, ...],
+) -> tuple[str, ...]:
+    normalized: list[str] = []
+    allowed = {str(plan.path.relative_to(config.pool_root)).replace("\\", "/")}
+    if plan.markdown and _is_inside(plan.markdown, config.pool_root):
+        allowed.add(str(plan.markdown.relative_to(config.pool_root)).replace("\\", "/"))
+    for raw in files:
+        path_text = str(raw).replace("\\", "/").strip()
+        if not path_text:
+            continue
+        path = Path(path_text)
+        if path.is_absolute():
+            resolved = path.resolve()
+            if not _is_inside(resolved, config.pool_root):
+                raise ConfigError(f"{path_text}: plan review-loop fix file must be under pool root")
+            path_text = str(resolved.relative_to(config.pool_root)).replace("\\", "/")
+        if path_text not in allowed and not path_text.startswith("plans/"):
+            raise ConfigError(f"{path_text}: plan review-loop fix file must be a planning file")
+        normalized.append(path_text)
+    return tuple(dict.fromkeys(normalized))
+
+
+def _plan_content_hash(plan: FeaturePlan) -> str:
+    hasher = hashlib.sha256()
+    for path in (plan.path, plan.markdown):
+        if path and path.is_file():
+            hasher.update(str(path).encode("utf-8"))
+            hasher.update(b"\0")
+            hasher.update(path.read_bytes())
+            hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
 def _task_audit_summary(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": raw.get("id"),
@@ -1562,6 +1784,16 @@ def _task_audit_summary(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validate_candidate_plan(config: ProjectConfig, plan: FeaturePlan, data: dict[str, Any]) -> None:
+    result = validate_plan_collection(config, _plan_collection_with_candidate(config, plan, data))
+    if result.errors:
+        raise ConfigError("; ".join(result.errors))
+
+
+def _plan_collection_with_candidate(
+    config: ProjectConfig,
+    plan: FeaturePlan,
+    data: dict[str, Any],
+) -> tuple[FeaturePlan, ...]:
     candidate = parse_plan(config.pool_root, plan.path, data)
     plans = tuple(
         candidate if existing.feature_id == candidate.feature_id else existing
@@ -1569,9 +1801,7 @@ def _validate_candidate_plan(config: ProjectConfig, plan: FeaturePlan, data: dic
     )
     if not any(existing.feature_id == candidate.feature_id for existing in plans):
         plans = (*plans, candidate)
-    result = validate_plan_collection(config, plans)
-    if result.errors:
-        raise ConfigError("; ".join(result.errors))
+    return plans
 
 
 def _mark_manifest_withdrawn(

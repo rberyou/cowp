@@ -142,6 +142,13 @@ def test_dashboard_html_uses_boot_script_without_embedding_user_data():
     assert "task.blockers" in html
     assert "task.integration_result" in html
     assert "task.setup_command" in html
+    assert "task-chip-row" in html
+    assert "task-meta" in html
+    assert "primaryStatus" in html
+    assert "Plan review loop:" in html
+    assert "Task review loop:" in html
+    assert "review_loop_needs_review" in html
+    assert "needs_review=true" in html
 
 
 def _get(url: str) -> dict[str, str | int]:

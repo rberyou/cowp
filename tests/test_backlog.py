@@ -69,6 +69,7 @@ def test_snapshot_groups_columns_and_merges_execution_state(git_repo: Path, work
         log_path=str(config.runs_root / "TASK-002" / "opencode.jsonl"),
         review_diff_path=str(config.runs_root / "TASK-002" / "review.diff"),
         final_diff_path=str(config.runs_root / "TASK-002" / "final.diff"),
+        review_loop={"status": "re_reviewing", "round": 2, "max_rounds": 3, "needs_review": True},
     )
 
     snapshot = build_backlog_snapshot(config)
@@ -83,6 +84,7 @@ def test_snapshot_groups_columns_and_merges_execution_state(git_repo: Path, work
     assert task["execution_status"] == "worker_succeeded"
     assert task["branch"] == "agent/TASK-002"
     assert task["allowed_files_count"] == 2
+    assert task["review_loop_needs_review"] is True
     json.dumps(data)
 
 
@@ -543,6 +545,46 @@ def test_backlog_status_lines_render_from_snapshot(git_repo: Path, workerpool_co
     assert "Backlog" in lines
     assert "Draft" in lines
     assert any("FEATURE-001 text status" in line for line in lines)
+
+
+def test_backlog_status_lines_clarify_review_loop_scope_and_needs_review(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    _write_feature_plan(
+        git_repo,
+        "FEATURE-001",
+        {
+            "feature_id": "FEATURE-001",
+            "title": "review loop display",
+            "status": "review",
+            "depends_on_features": [],
+            "markdown": "plans/FEATURE-001.md",
+            "open_decisions": [],
+            "review_findings": [],
+            "review_loop": {"status": "reviewing", "round": 1, "max_rounds": 3, "needs_review": True},
+            "tasks": [
+                {
+                    "id": "TASK-001",
+                    "title": "task review loop display",
+                    "status": "exported",
+                    "allowed_files": ["src/example.py"],
+                    "prompt": "WRITE src/example.py",
+                }
+            ],
+        },
+    )
+    config = load_project_config(git_repo)
+    StateStore(config.runs_root).update(
+        "TASK-001",
+        status="worker_succeeded",
+        review_loop={"status": "re_reviewing", "round": 2, "max_rounds": 3, "needs_review": True},
+    )
+
+    lines = backlog_status_lines(config)
+
+    assert any("plan_review_loop: reviewing round=1/3 needs_review=true" in line for line in lines)
+    assert any("task_review_loop: re_reviewing round=2/3 needs_review=true" in line for line in lines)
 
 
 def _column(data: dict, title: str) -> dict:
