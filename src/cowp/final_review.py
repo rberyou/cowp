@@ -374,6 +374,7 @@ def record_final_review_fix(
     files: Iterable[str],
 ) -> dict[str, Any]:
     group, record = ensure_target_review_record(config, manifest, target_branch)
+    _ensure_final_review_loop_started(record, "record-fix")
     if not group.base_sha:
         raise ConfigError(f"{target_branch}: final review base is missing")
     changed_files = _normalize_paths(files)
@@ -526,7 +527,8 @@ def add_final_review_finding(
         StateStore(config.runs_root),
         group.group_id,
         record,
-        status="blocked_decision" if finding.get("requires_decision") else record.get("status", "reviewing"),
+        status=_status_after_finding_change(record, findings),
+        review_loop=_review_loop_after_finding_change(config, record, findings),
         review_findings=findings,
     )
     StateStore(config.runs_root).append_target_audit_event(group.group_id, "final-review finding add", f"added {finding['id']}", finding=finding)
@@ -565,7 +567,14 @@ def update_final_review_finding(
     if finding.get("status") == "wontfix" and _is_disallowed_wontfix(finding):
         raise ConfigError(f"{finding['id']}: wontfix is not allowed for this finding")
     finding["updated_at"] = now_iso()
-    updated = _save_target_review(StateStore(config.runs_root), group.group_id, record, review_findings=findings)
+    updated = _save_target_review(
+        StateStore(config.runs_root),
+        group.group_id,
+        record,
+        status=_status_after_finding_change(record, findings),
+        review_loop=_review_loop_after_finding_change(config, record, findings),
+        review_findings=findings,
+    )
     StateStore(config.runs_root).append_target_audit_event(
         group.group_id,
         "final-review finding update",
@@ -618,6 +627,7 @@ def commit_final_review_fix(
     acceptance_command: str | None = None,
 ) -> FinalReviewCommitResult:
     group, record = ensure_target_review_record(config, manifest, target_branch)
+    _ensure_final_review_loop_started(record, "commit-fix")
     files = _normalize_paths(reviewed_files)
     if not files:
         raise ConfigError("final-review commit-fix requires --reviewed-files")
@@ -661,7 +671,13 @@ def commit_final_review_fix(
             "committed_at": now_iso(),
         }
     )
-    loop = record.get("review_loop") or {"status": "not_started", "round": 0}
+    loop = mark_review_loop_fix(
+        record.get("review_loop"),
+        message,
+        files,
+        now_iso(),
+        current_sha=commit_sha,
+    )
     updated = _save_target_review(
         StateStore(config.runs_root),
         group.group_id,
@@ -844,9 +860,13 @@ def _base_ref_for_group(config: ProjectConfig, tasks: Iterable[ManifestTask]) ->
 def _normalize_paths(paths: Iterable[str]) -> list[str]:
     result: list[str] = []
     for item in paths:
-        path = str(item).replace("\\", "/").strip("/")
-        if not path or path.startswith("../") or "/../" in path or path == "..":
+        raw = str(item).replace("\\", "/").strip()
+        if not raw or Path(raw).is_absolute() or raw.startswith("/") or any(char in raw for char in "*?[]:"):
             raise ConfigError(f"invalid reviewed path: {item}")
+        parts = [part for part in raw.strip("/").split("/") if part]
+        if not parts or any(part in {".", ".."} for part in parts):
+            raise ConfigError(f"invalid reviewed path: {item}")
+        path = "/".join(parts)
         if path not in result:
             result.append(path)
     return result
@@ -873,6 +893,48 @@ def _has_only_reviewed_changes(worktree: Path, reviewed: set[str]) -> bool:
         return False
     changed = _worktree_changed_files(worktree)
     return bool(changed) and set(changed).issubset(reviewed)
+
+
+def _status_after_finding_change(record: dict[str, Any], findings: list[dict[str, Any]]) -> str:
+    current = str(record.get("status") or "reviewing")
+    if current == "waiting_for_tasks":
+        return current
+    if not review_finding_blockers(findings):
+        return current
+    if decision_finding_blockers(findings):
+        return "blocked_decision"
+    if current == "clean":
+        return "reviewing"
+    return current
+
+
+def _review_loop_after_finding_change(
+    config: ProjectConfig,
+    record: dict[str, Any],
+    findings: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    loop = record.get("review_loop")
+    if not review_finding_blockers(findings):
+        return loop if isinstance(loop, dict) else None
+    decision_blockers = decision_finding_blockers(findings)
+    if decision_blockers and str(record.get("status") or "reviewing") != "waiting_for_tasks":
+        return stop_review_loop(
+            loop,
+            "blocked_decision",
+            decision_blockers,
+            "decision finding blocks final review loop",
+            now_iso(),
+        )
+    if isinstance(loop, dict) and str(loop.get("status") or "not_started") == "clean":
+        return begin_review_loop(loop, config.review_loop.max_rounds, now_iso())
+    return loop if isinstance(loop, dict) else None
+
+
+def _ensure_final_review_loop_started(record: dict[str, Any], command: str) -> None:
+    loop = record.get("review_loop") if isinstance(record.get("review_loop"), dict) else {}
+    if str(loop.get("status") or "not_started") == "not_started":
+        target = str(record.get("target_branch") or "target")
+        raise ConfigError(f"{target}: final-review {command} requires review-loop begin")
 
 
 def _save_target_review(

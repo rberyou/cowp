@@ -271,6 +271,10 @@ cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\P
   Codex on the target branch. It stages only explicit `--reviewed-files`, runs
   the configured acceptance command, records the fix commit, and requires a
   fresh final review before completion.
+- `cowp final-review record-fix` and `cowp final-review commit-fix` require a
+  started final review loop. Reviewed paths must be relative repository paths;
+  absolute paths, parent traversal, wildcards, and Git pathspec magic are
+  refused.
 - Decision findings, boundary changes, API/schema changes, destructive actions,
   and large cross-boundary follow-up work must stop the final review loop or
   become new tasks instead of being committed as final-review fixes.

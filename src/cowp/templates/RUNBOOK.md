@@ -584,6 +584,10 @@ cowp final-review review `
   --summary
 ```
 
+`record-fix` and `commit-fix` require the final review loop to be started with
+`begin`. Reviewed paths must be relative repository paths; absolute paths,
+parent traversal, wildcards, and Git pathspec magic are refused.
+
 Resolve the finding after the re-review confirms the fix:
 
 ```powershell

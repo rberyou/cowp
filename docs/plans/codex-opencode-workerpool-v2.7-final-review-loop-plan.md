@@ -145,7 +145,11 @@ Fixes:
   the target branch. If Git reports the target branch is already checked out
   elsewhere, or the controller worktree cannot switch cleanly, create or reuse a
   dedicated final-review worktree under `worktree_root/_final/<group-id>`.
+- `record-fix` and `commit-fix` require an active final review loop; they do not
+  implicitly replace `final-review begin`.
 - It stages only explicitly reviewed files.
+- Reviewed paths must be relative repository paths; absolute paths, parent
+  traversal, wildcards, and Git pathspec magic are refused.
 - It refuses unreviewed tracked or untracked changes.
 - It runs the configured acceptance command when supplied, otherwise the
   repository main acceptance command.

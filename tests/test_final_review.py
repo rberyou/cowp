@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from cowp.cli import main
-from cowp.config import ManifestTask, load_project_config, write_json
-from cowp.final_review import target_group_base_sha, target_review_group_id
+from cowp.config import ConfigError, ManifestTask, load_manifest, load_project_config, write_json
+from cowp.final_review import _normalize_paths, target_group_base_sha, target_review_blockers, target_review_group_id
 from cowp.gitops import current_branch
 from cowp.state import StateStore
 from tests.conftest import run, write_manifest
@@ -30,6 +32,13 @@ def test_target_review_group_id_is_path_safe():
     assert ":" not in group_id
     assert "/" not in group_id
     assert "\\" not in group_id
+
+
+def test_final_review_paths_must_be_relative_repository_paths():
+    assert _normalize_paths(["src\\example.py", "src/example.py"]) == ["src/example.py"]
+    for path in ("../outside.py", "src/../outside.py", "/tmp/outside.py", "C:/tmp/outside.py", "src/*.py", "src:example.py"):
+        with pytest.raises(ConfigError):
+            _normalize_paths([path])
 
 
 def test_final_review_begin_waits_for_all_target_tasks(git_repo: Path, workerpool_config: Path):
@@ -78,6 +87,50 @@ def test_final_review_begin_waits_for_all_target_tasks(git_repo: Path, workerpoo
         )
         == 1
     )
+
+
+def test_final_review_finding_keeps_waiting_status_when_tasks_are_not_merged(
+    git_repo: Path,
+    workerpool_config: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "pending task",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+                "feature_id": "FEATURE-001",
+            }
+        ],
+    )
+    target = current_branch(git_repo)
+
+    assert (
+        main(
+            [
+                "final-review",
+                "finding",
+                "add",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--target",
+                target,
+                "--type",
+                "bug",
+                "--message",
+                "found early",
+            ]
+        )
+        == 0
+    )
+    record = next(iter(StateStore(load_project_config(git_repo).runs_root).load_target_reviews().values()))
+    assert record["status"] == "waiting_for_tasks"
+    assert record["review_findings"][0]["id"] == "FRF-001"
 
 
 def test_target_group_base_sha_uses_first_successful_finish_attempt(git_repo: Path, workerpool_config: Path):
@@ -213,6 +266,166 @@ def test_final_review_allows_feature_done_after_clean_gate(
     assert json.loads(plan_path.read_text(encoding="utf-8"))["status"] == "done"
 
 
+def test_final_review_finding_after_clean_reopens_target_gate(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    _write_feature_plan(git_repo)
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "change src",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+                "feature_id": "FEATURE-001",
+            }
+        ],
+    )
+    target = current_branch(git_repo)
+    _finish_task(git_repo, manifest, "TASK-001", "src/example.py")
+    assert main(["final-review", "begin", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target]) == 0
+    assert main(["final-review", "review", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target, "--summary"]) == 0
+    assert main(["final-review", "complete", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target]) == 0
+
+    assert (
+        main(
+            [
+                "final-review",
+                "finding",
+                "add",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--target",
+                target,
+                "--type",
+                "bug",
+                "--message",
+                "late issue",
+            ]
+        )
+        == 0
+    )
+    record = next(iter(StateStore(load_project_config(git_repo).runs_root).load_target_reviews().values()))
+    assert record["status"] == "reviewing"
+    assert record["review_loop"]["status"] == "re_reviewing"
+    assert (
+        main(
+            [
+                "plan",
+                "set-status",
+                "--repo",
+                str(git_repo),
+                "--feature",
+                "FEATURE-001",
+                "--manifest",
+                str(manifest),
+                "--status",
+                "done",
+            ]
+        )
+        == 1
+    )
+    (git_repo / "src" / "example.py").write_text((git_repo / "src" / "example.py").read_text(encoding="utf-8") + "# late fix\n", encoding="utf-8")
+    assert (
+        main(
+            [
+                "final-review",
+                "commit-fix",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--target",
+                target,
+                "--reviewed-files",
+                "src/example.py",
+                "--message",
+                "fix late final review issue",
+            ]
+        )
+        == 0
+    )
+    assert main(["final-review", "review", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target, "--summary"]) == 0
+    assert (
+        main(
+            [
+                "final-review",
+                "finding",
+                "resolve",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--target",
+                target,
+                "--finding",
+                "FRF-001",
+                "--resolution",
+                "fixed",
+            ]
+        )
+        == 0
+    )
+    assert main(["final-review", "complete", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target]) == 0
+    config = load_project_config(git_repo)
+    assert target_review_blockers(config, load_manifest(config, manifest), target) == []
+
+
+def test_final_review_decision_finding_stops_loop(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "change src",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+                "feature_id": "FEATURE-001",
+            }
+        ],
+    )
+    target = current_branch(git_repo)
+    _finish_task(git_repo, manifest, "TASK-001", "src/example.py")
+    assert main(["final-review", "begin", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target]) == 0
+    assert main(["final-review", "review", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target, "--summary"]) == 0
+
+    assert (
+        main(
+            [
+                "final-review",
+                "finding",
+                "add",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--target",
+                target,
+                "--type",
+                "boundary",
+                "--message",
+                "requires scope decision",
+            ]
+        )
+        == 0
+    )
+    record = next(iter(StateStore(load_project_config(git_repo).runs_root).load_target_reviews().values()))
+    assert record["status"] == "blocked_decision"
+    assert record["review_loop"]["status"] == "blocked_decision"
+    assert record["review_loop"]["blocked_by"] == ["FRF-001"]
+
+
 def test_final_review_complete_requires_review_after_begin(
     git_repo: Path,
     workerpool_config: Path,
@@ -240,6 +453,50 @@ def test_final_review_complete_requires_review_after_begin(
     assert main(["final-review", "complete", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target]) == 1
     assert main(["final-review", "review", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target, "--summary"]) == 0
     assert main(["final-review", "complete", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target]) == 0
+
+
+def test_final_review_commit_fix_requires_loop_begin(
+    git_repo: Path,
+    workerpool_config: Path,
+    fake_opencode: Path,
+):
+    manifest = write_manifest(
+        git_repo,
+        [
+            {
+                "id": "TASK-001",
+                "title": "change src",
+                "worker": "default",
+                "prompt_file": ".codex-workerpool/tasks/TASK-001.md",
+                "allowed_files": ["src/example.py"],
+                "feature_id": "FEATURE-001",
+            }
+        ],
+    )
+    target = current_branch(git_repo)
+    _finish_task(git_repo, manifest, "TASK-001", "src/example.py")
+    assert main(["final-review", "review", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target, "--summary"]) == 0
+    (git_repo / "src" / "example.py").write_text((git_repo / "src" / "example.py").read_text(encoding="utf-8") + "# no begin\n", encoding="utf-8")
+
+    assert (
+        main(
+            [
+                "final-review",
+                "commit-fix",
+                "--repo",
+                str(git_repo),
+                "--manifest",
+                str(manifest),
+                "--target",
+                target,
+                "--reviewed-files",
+                "src/example.py",
+                "--message",
+                "fix without begin",
+            ]
+        )
+        == 1
+    )
 
 
 def test_final_review_commit_fix_requires_reviewed_files_and_refresh(
