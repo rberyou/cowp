@@ -514,7 +514,130 @@ repository, refuses stale review snapshots, stages only reviewed files, creates
 a local task commit on the controller branch, records
 `finish_destination=controller_branch`, and does not merge.
 
-## 8. SVN+Git Prepublish Gate
+## 8. Target Final Review Gate
+
+After every active manifest task targeting the same branch is merged, run one
+target final review loop for that branch. This is a batch-level gate over the
+combined target branch diff. It does not replace task review, and it does not
+block later `start`, `run`, or `finish`; it blocks feature `done` and publish
+readiness.
+
+Start the loop and generate review material:
+
+```powershell
+cowp final-review begin `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --target codex/my-feature
+
+cowp final-review review `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --target codex/my-feature `
+  --summary
+```
+
+`final-review review` records the target branch diff under
+`runs_root/final-review/<group-id>/`. Use `--summary`, `--files`, or repeated
+`--file <path>` when the terminal output should be smaller.
+
+Record target-level findings with `FRF-NNN` ids:
+
+```powershell
+cowp final-review finding add `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --target codex/my-feature `
+  --type bug `
+  --severity P2 `
+  --message "short finding"
+```
+
+Codex may fix non-decision findings directly on the target branch. The commit
+gate stages only explicit reviewed paths and records the fix commit:
+
+```powershell
+cowp final-review commit-fix `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --target codex/my-feature `
+  --reviewed-files src/example.py tests/test_example.py `
+  --message "fix final review finding FRF-001"
+
+cowp final-review record-fix `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --target codex/my-feature `
+  --summary "fixed FRF-001" `
+  --file src/example.py
+
+cowp final-review review `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --target codex/my-feature `
+  --summary
+```
+
+Resolve the finding after the re-review confirms the fix:
+
+```powershell
+cowp final-review finding resolve `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --target codex/my-feature `
+  --finding FRF-001 `
+  --resolution "fixed and retested"
+```
+
+Decision findings stop the loop. Product behavior, public API, schema,
+architecture, dependency, task-boundary, destructive, rollback, or large
+cross-boundary questions should become controller decisions or new tasks:
+
+```powershell
+cowp final-review stop `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --target codex/my-feature `
+  --reason blocked_decision `
+  --blocker FRF-001 `
+  --message "requires controller/user decision"
+```
+
+When the target review is clean and fresh, complete the loop:
+
+```powershell
+cowp final-review complete `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --target codex/my-feature
+```
+
+Mark the feature done only after the related target final reviews are clean:
+
+```powershell
+cowp plan set-status `
+  --repo . `
+  --pool-dir ..\Project.workerpool `
+  --manifest tasks.json `
+  --plan plans\FEATURE-001.plan.json `
+  --status done
+```
+
+If several features share the same target branch, wait until all active
+manifest tasks in that target group are merged, then run one final review for
+the shared branch. A clean final review becomes stale when new commits land on
+the target branch.
+
+## 9. SVN+Git Prepublish Gate
 
 For `svn_git + controller_serial`, one `publish_batch` is the future manual SVN
 commit boundary. Tasks may come from multiple features as long as they share the
@@ -535,6 +658,7 @@ The gate checks:
 
 - all selected batch tasks are locally committed;
 - no open execution review findings block the batch;
+- every selected target branch has a clean, fresh final review;
 - `git_base_commit..HEAD` contains only selected task commits;
 - SVN has no conflict, missing, obstructed, switched, unversioned, or
   out-of-date paths;
@@ -555,7 +679,7 @@ After the manual SVN commit leaves SVN status clean and Git status clean, the
 next `cowp start` for a new publish batch closes the previous ready baseline as
 `manually_published_or_cleaned` and records a new baseline.
 
-## 9. Refresh Local Workflow Files
+## 10. Refresh Local Workflow Files
 
 If this repository keeps WorkerPool files ignored locally, check drift after
 upgrading WorkerPool:

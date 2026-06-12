@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from cowp.config import ConfigError, ProjectConfig, load_json
+from cowp.config import ConfigError, ProjectConfig, load_json, load_manifest
+from cowp.final_review import build_target_review_group, target_branch_for_task, target_review_blockers
 from cowp.planning import FeaturePlan, PlanTask, load_all_plans, validate_plan_collection
 from cowp.queries import WorkflowQueries, review_finding_blockers
 from cowp.review_loop import active_finding_blockers
@@ -105,11 +106,34 @@ class BacklogColumn:
 
 
 @dataclass(frozen=True)
+class BacklogFinalReview:
+    group_id: str
+    target_branch: str
+    status: str
+    task_ids: tuple[str, ...]
+    feature_ids: tuple[str, ...]
+    blockers: tuple[str, ...]
+    review_findings: tuple[str, ...]
+    review_loop_status: str | None
+    review_loop_round: int | None
+    review_loop_max_rounds: int | None
+    review_loop_blocked_by: tuple[str, ...]
+    review_loop_needs_review: bool
+    review_diff_path: str | None
+    review_snapshot_hash: str | None
+    current_snapshot_hash: str | None
+    worktree: str | None
+    created_worktree: bool
+    target_head_sha: str | None
+
+
+@dataclass(frozen=True)
 class BacklogSnapshot:
     generated_at: str
     repo: str
     pool_root: str
     columns: tuple[BacklogColumn, ...]
+    final_reviews: tuple[BacklogFinalReview, ...]
     unassigned_tasks: tuple[BacklogTask, ...]
     validation_errors: tuple[str, ...]
     validation_warnings: tuple[str, ...]
@@ -138,6 +162,8 @@ def build_backlog_snapshot(config: ProjectConfig) -> BacklogSnapshot:
     manifest_errors: list[str] = []
     unassigned_tasks = _unassigned_manifest_tasks(config, seen_task_ids, states, manifest_errors)
     validation_errors = [*validation.errors, *manifest_errors]
+    final_reviews, final_review_errors = _final_review_snapshots(config)
+    validation_errors.extend(final_review_errors)
 
     return BacklogSnapshot(
         generated_at=now_iso(),
@@ -151,6 +177,7 @@ def build_backlog_snapshot(config: ProjectConfig) -> BacklogSnapshot:
             )
             for title in KANBAN_COLUMNS
         ),
+        final_reviews=tuple(final_reviews),
         unassigned_tasks=tuple(unassigned_tasks),
         validation_errors=tuple(validation_errors),
         validation_warnings=tuple(validation.warnings),
@@ -170,6 +197,7 @@ def backlog_snapshot_to_dict(snapshot: BacklogSnapshot) -> dict[str, Any]:
             }
             for column in snapshot.columns
         ],
+        "final_reviews": [_final_review_to_dict(review) for review in snapshot.final_reviews],
         "unassigned_tasks": [_task_to_dict(task) for task in snapshot.unassigned_tasks],
         "validation_errors": list(snapshot.validation_errors),
         "validation_warnings": list(snapshot.validation_warnings),
@@ -195,6 +223,27 @@ def backlog_status_lines(config: ProjectConfig) -> list[str]:
         lines.append(column.title)
         for feature in column.features:
             lines.extend(_feature_lines(feature))
+
+    if snapshot.final_reviews:
+        lines.append("")
+        lines.append("Final Review")
+        for review in snapshot.final_reviews:
+            lines.append(f"  {review.target_branch} [{review.status}]")
+            if review.task_ids:
+                lines.append("    tasks: " + ", ".join(review.task_ids))
+            if review.feature_ids:
+                lines.append("    features: " + ", ".join(review.feature_ids))
+            if review.blockers:
+                lines.append("    blocked_by: " + "; ".join(review.blockers))
+            if review.review_findings:
+                lines.append("    review_findings: " + "; ".join(review.review_findings))
+            if review.review_loop_status and review.review_loop_status != "not_started":
+                loop_text = f"{review.review_loop_status} round={review.review_loop_round}/{review.review_loop_max_rounds}"
+                if review.review_loop_blocked_by:
+                    loop_text += " blocked_by=" + ",".join(review.review_loop_blocked_by)
+                if review.review_loop_needs_review:
+                    loop_text += " needs_review=true"
+                lines.append("    final_review_loop: " + loop_text)
 
     if snapshot.unassigned_tasks:
         lines.append("")
@@ -591,8 +640,12 @@ def _task_review_blockers(state: TaskState | None) -> list[str]:
 def _task_review_finding_lines(state: TaskState | None) -> list[str]:
     if not state:
         return []
+    return _review_finding_lines(state.task_review_findings or [])
+
+
+def _review_finding_lines(findings: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
-    for finding in state.task_review_findings or []:
+    for finding in findings:
         if not review_finding_blockers([finding]):
             continue
         lines.append(
@@ -754,6 +807,109 @@ def _task_to_dict(task: BacklogTask) -> dict[str, Any]:
         "review_snapshot_hash": task.review_snapshot_hash,
         "current_snapshot_hash": task.current_snapshot_hash,
     }
+
+
+def _final_review_to_dict(review: BacklogFinalReview) -> dict[str, Any]:
+    return {
+        "group_id": review.group_id,
+        "target_branch": review.target_branch,
+        "status": review.status,
+        "task_ids": list(review.task_ids),
+        "feature_ids": list(review.feature_ids),
+        "blockers": list(review.blockers),
+        "review_findings": list(review.review_findings),
+        "review_loop_status": review.review_loop_status,
+        "review_loop_round": review.review_loop_round,
+        "review_loop_max_rounds": review.review_loop_max_rounds,
+        "review_loop_blocked_by": list(review.review_loop_blocked_by),
+        "review_loop_needs_review": review.review_loop_needs_review,
+        "review_diff_path": review.review_diff_path,
+        "review_snapshot_hash": review.review_snapshot_hash,
+        "current_snapshot_hash": review.current_snapshot_hash,
+        "worktree": review.worktree,
+        "created_worktree": review.created_worktree,
+        "target_head_sha": review.target_head_sha,
+    }
+
+
+def _final_review_snapshots(config: ProjectConfig) -> tuple[list[BacklogFinalReview], list[str]]:
+    errors: list[str] = []
+    store = StateStore(config.runs_root)
+    states = store.load()
+    records = store.load_target_reviews()
+    seen_group_ids: set[str] = set()
+    result: list[BacklogFinalReview] = []
+    manifest_path = config.pool_root / "tasks.json"
+    if manifest_path.exists():
+        try:
+            manifest = load_manifest(config, manifest_path)
+            targets = sorted(
+                {
+                    target_branch_for_task(config, task, states.get(task.id))
+                    for task in manifest.tasks
+                    if task.active and not task.withdrawn
+                }
+            )
+            for target in targets:
+                try:
+                    group = build_target_review_group(config, manifest, target, states=states)
+                    blockers = tuple(target_review_blockers(config, manifest, target))
+                    record = records.get(group.group_id, {})
+                    result.append(_record_to_final_review(group.group_id, target, record, group, blockers))
+                    seen_group_ids.add(group.group_id)
+                except (ConfigError, RuntimeError) as exc:
+                    errors.append(f"final review {target}: {exc}")
+        except ConfigError as exc:
+            errors.append(f"final review manifest error: {exc}")
+    for group_id, record in sorted(records.items()):
+        if group_id in seen_group_ids:
+            continue
+        result.append(
+            _record_to_final_review(
+                group_id,
+                str(record.get("target_branch") or group_id),
+                record,
+                None,
+                (),
+            )
+        )
+    return result, errors
+
+
+def _record_to_final_review(
+    group_id: str,
+    target_branch: str,
+    record: dict[str, Any],
+    group: Any | None,
+    blockers: tuple[str, ...],
+) -> BacklogFinalReview:
+    loop = record.get("review_loop") if isinstance(record.get("review_loop"), dict) else None
+    findings = record.get("review_findings") if isinstance(record.get("review_findings"), list) else []
+    task_ids = tuple(str(item) for item in (record.get("task_ids") or ()))
+    feature_ids = tuple(str(item) for item in (record.get("feature_ids") or ()))
+    if group is not None:
+        task_ids = tuple(task.id for task in group.tasks)
+        feature_ids = group.feature_ids
+    return BacklogFinalReview(
+        group_id=group_id,
+        target_branch=target_branch,
+        status=str(record.get("status") or "waiting_for_tasks"),
+        task_ids=task_ids,
+        feature_ids=feature_ids,
+        blockers=blockers,
+        review_findings=tuple(_review_finding_lines(findings)),
+        review_loop_status=_loop_status(loop),
+        review_loop_round=_loop_round(loop),
+        review_loop_max_rounds=_loop_max_rounds(loop),
+        review_loop_blocked_by=_loop_blocked_by(loop),
+        review_loop_needs_review=_loop_needs_review(loop),
+        review_diff_path=record.get("review_diff_path"),
+        review_snapshot_hash=record.get("review_snapshot_hash"),
+        current_snapshot_hash=record.get("current_snapshot_hash"),
+        worktree=record.get("worktree"),
+        created_worktree=bool(record.get("created_worktree", False)),
+        target_head_sha=record.get("target_head_sha"),
+    )
 
 
 def _optional_str(value: Any) -> str | None:

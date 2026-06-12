@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from cowp.config import EXECUTION_CONTROLLER_SERIAL, VCS_SVN_GIT, Manifest, ManifestTask, ProjectConfig
+from cowp.final_review import final_review_blockers_for_tasks
 from cowp.gitops import (
     AcceptanceError,
     GitError,
@@ -132,6 +133,7 @@ def run_prepublish_gate(
         if not state or state.status != "merged":
             blockers.append(f"{task.id}: task is not locally committed")
         blockers.extend(f"{task.id}: {blocker}" for blocker in review_finding_blockers(state.task_review_findings if state else []))
+    blockers.extend(final_review_blockers_for_tasks(config, manifest, included_tasks))
     running = [
         state.task_id
         for state in states.values()

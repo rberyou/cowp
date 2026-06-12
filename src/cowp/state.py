@@ -159,23 +159,40 @@ class StateStore:
         self.runs_root = runs_root
         self.path = runs_root / "state.json"
 
-    def load(self) -> dict[str, TaskState]:
+    def load_payload(self) -> dict[str, Any]:
         with _STATE_LOCK:
             if not self.path.exists():
-                return {}
+                return {"tasks": {}, "target_reviews": {}}
             text = self.path.read_text(encoding="utf-8-sig")
             if not text.strip():
-                return {}
+                return {"tasks": {}, "target_reviews": {}}
             raw = json.loads(text)
+            if not isinstance(raw, dict):
+                return {"tasks": {}, "target_reviews": {}}
+            raw.setdefault("tasks", {})
+            raw.setdefault("target_reviews", {})
+            return raw
+
+    def load(self) -> dict[str, TaskState]:
+        with _STATE_LOCK:
+            raw = self.load_payload()
             return {
                 task_id: TaskState.from_json(value)
                 for task_id, value in raw.get("tasks", {}).items()
+                if isinstance(value, dict)
             }
 
     def save(self, states: dict[str, TaskState]) -> None:
         with _STATE_LOCK:
+            payload = self.load_payload()
+            payload["tasks"] = {task_id: state.to_json() for task_id, state in sorted(states.items())}
+            self.save_payload(payload)
+
+    def save_payload(self, payload: dict[str, Any]) -> None:
+        with _STATE_LOCK:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"tasks": {task_id: state.to_json() for task_id, state in sorted(states.items())}}
+            payload.setdefault("tasks", {})
+            payload.setdefault("target_reviews", {})
             tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
             tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             tmp_path.replace(self.path)
@@ -214,6 +231,54 @@ class StateStore:
                 }
             )
             return self.update(task_id, task_audit_events=events)
+
+    def load_target_reviews(self) -> dict[str, dict[str, Any]]:
+        with _STATE_LOCK:
+            payload = self.load_payload()
+            raw = payload.get("target_reviews", {})
+            if not isinstance(raw, dict):
+                return {}
+            return {str(key): dict(value) for key, value in raw.items() if isinstance(value, dict)}
+
+    def save_target_reviews(self, target_reviews: dict[str, dict[str, Any]]) -> None:
+        with _STATE_LOCK:
+            payload = self.load_payload()
+            payload["target_reviews"] = {
+                str(key): dict(value)
+                for key, value in sorted(target_reviews.items())
+                if isinstance(value, dict)
+            }
+            self.save_payload(payload)
+
+    def update_target_review(self, group_id: str, **changes: Any) -> dict[str, Any]:
+        with _STATE_LOCK:
+            reviews = self.load_target_reviews()
+            current = dict(reviews.get(group_id) or {})
+            current.update(changes)
+            current["group_id"] = group_id
+            current["updated_at"] = now_iso()
+            reviews[group_id] = current
+            self.save_target_reviews(reviews)
+            return current
+
+    def append_target_audit_event(self, group_id: str, command: str, message: str, **details: Any) -> dict[str, Any]:
+        with _STATE_LOCK:
+            reviews = self.load_target_reviews()
+            current = dict(reviews.get(group_id) or {"group_id": group_id})
+            events = list(current.get("audit_events") or [])
+            events.append(
+                {
+                    "at": now_iso(),
+                    "command": command,
+                    "message": message,
+                    "details": details,
+                }
+            )
+            current["audit_events"] = events
+            current["updated_at"] = now_iso()
+            reviews[group_id] = current
+            self.save_target_reviews(reviews)
+            return current
 
 
 def _list_of_dicts(value: Any) -> list[dict[str, Any]]:

@@ -229,6 +229,7 @@ def test_svn_git_prepublish_writes_report_and_never_commits(
     tmp_path: Path,
 ):
     manifest, log_path = _finish_two_task_svn_git_batch(git_repo, workerpool_config, monkeypatch, tmp_path)
+    _complete_final_review(git_repo, manifest)
     monkeypatch.setenv("FAKE_SVN_STATUS", "M       src/example.py\nM       tests/test_example.py\n")
 
     assert (
@@ -272,6 +273,7 @@ def test_svn_git_prepublish_failure_writes_blocker_report(
     tmp_path: Path,
 ):
     manifest, _ = _finish_two_task_svn_git_batch(git_repo, workerpool_config, monkeypatch, tmp_path)
+    _complete_final_review(git_repo, manifest)
     monkeypatch.setenv("FAKE_SVN_STATUS", "M       src/example.py\nM       tests/test_example.py\n")
     monkeypatch.setenv("FAKE_SVN_STATUS_U", "M       * src/example.py\n")
 
@@ -346,6 +348,7 @@ def test_svn_git_next_sync_closes_ready_batch_after_manual_clean(
     tmp_path: Path,
 ):
     manifest, _ = _finish_two_task_svn_git_batch(git_repo, workerpool_config, monkeypatch, tmp_path)
+    _complete_final_review(git_repo, manifest)
     monkeypatch.setenv("FAKE_SVN_STATUS", "M       src/example.py\nM       tests/test_example.py\n")
     assert (
         main(
@@ -441,3 +444,10 @@ def _finish_two_task_svn_git_batch(
     assert main(["review", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-002"]) == 0
     assert main(["finish", "--repo", str(git_repo), "--manifest", str(manifest), "--task", "TASK-002", "--reviewed-all-changed"]) == 0
     return manifest, log_path
+
+
+def _complete_final_review(git_repo: Path, manifest: Path) -> None:
+    target = load_project_config(git_repo).base_branch
+    assert main(["final-review", "begin", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target]) == 0
+    assert main(["final-review", "review", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target, "--summary"]) == 0
+    assert main(["final-review", "complete", "--repo", str(git_repo), "--manifest", str(manifest), "--target", target]) == 0
