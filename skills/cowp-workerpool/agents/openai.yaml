@@ -1,0 +1,4 @@
+interface:
+  display_name: "COWP WorkerPool"
+  short_description: "Run Codex-led OpenCode WorkerPool workflows."
+  default_prompt: "Use $cowp-workerpool to plan, run, review, and finish this WorkerPool workflow."

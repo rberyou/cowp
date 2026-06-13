@@ -131,6 +131,63 @@ cowp plan add-task --repo G:\workspace\Project --pool-dir G:\workspace\Project.w
 cowp plan link-replacement --repo G:\workspace\Project --pool-dir G:\workspace\Project.workerpool --plan plans\FEATURE-001.plan.json --task TASK-001 --replacement TASK-002 --contract compatible
 ```
 
+## Codex Skill
+
+This repository includes a source copy of the Codex skill at
+`skills/cowp-workerpool`. The skill is a thin operational wrapper around the
+`cowp` CLI: it tells Codex when to use WorkerPool, which references to load,
+how to respect planning/task/final review gates, and when to stop for a user
+decision. It does not replace the CLI and does not install itself
+automatically.
+
+Install a copy into the local Codex skill directory:
+
+```powershell
+$skillRoot = if ($env:CODEX_HOME) {
+  Join-Path $env:CODEX_HOME "skills"
+} else {
+  Join-Path $HOME ".codex\skills"
+}
+$skillPath = Join-Path $skillRoot "cowp-workerpool"
+if (Test-Path $skillPath) {
+  throw "cowp-workerpool is already installed at $skillPath; inspect it before replacing it."
+}
+New-Item -ItemType Directory -Force -Path $skillRoot | Out-Null
+Copy-Item -Recurse .\skills\cowp-workerpool $skillPath
+```
+
+For local skill development, use a junction instead of a copy:
+
+```powershell
+$skillRoot = if ($env:CODEX_HOME) {
+  Join-Path $env:CODEX_HOME "skills"
+} else {
+  Join-Path $HOME ".codex\skills"
+}
+$skillPath = Join-Path $skillRoot "cowp-workerpool"
+if (Test-Path $skillPath) {
+  throw "cowp-workerpool is already installed at $skillPath; inspect it before replacing it."
+}
+New-Item -ItemType Directory -Force -Path $skillRoot | Out-Null
+New-Item -ItemType Junction `
+  -Path $skillPath `
+  -Target (Resolve-Path ".\skills\cowp-workerpool").Path
+```
+
+Validate the skill with the installed `skill-creator` tooling:
+
+```powershell
+$codexHome = if ($env:CODEX_HOME) {
+  $env:CODEX_HOME
+} else {
+  Join-Path $HOME ".codex"
+}
+$skillCreatorRoot = Join-Path $codexHome "skills\.system\skill-creator"
+& ".\.venv\Scripts\python.exe" `
+  (Join-Path $skillCreatorRoot "scripts\quick_validate.py") `
+  .\skills\cowp-workerpool
+```
+
 ## Model
 
 - In `worktree_parallel`, one task maps to one branch and one worktree.
